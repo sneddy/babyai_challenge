@@ -1,0 +1,12 @@
+{
+  "training": {
+    "n_eval_episodes": 20
+  },
+  "bc": {
+    "epochs": 5,
+    "batch_size": 512,
+    "learning_rate": 0.00002,
+    "weight_decay": 0.0,
+    "min_sampling_proba": 0.1
+  }
+}

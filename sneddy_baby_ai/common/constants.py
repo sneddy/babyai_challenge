@@ -1,0 +1,14 @@
+"""Non-user-facing constants."""
+
+DEFAULT_ACTION_DIM = 7
+DEFAULT_MAX_MISSION_LENGTH = 32
+
+DEMO_SEED_BASE = 1_000_000
+EVAL_TRAIN_SEED_BASE = 2_000_000
+EVAL_VAL_SEED_BASE = 2_100_000
+
+DEFAULT_IMAGE_CHANNEL_VOCABS = {
+    "object": 16,
+    "color": 16,
+    "state": 8,
+}

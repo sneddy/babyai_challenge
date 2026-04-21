@@ -1,0 +1,14 @@
+{
+  "action_dim": 7,
+  "image_embedding_dim": 128,
+  "mission_embedding_dim": 64,
+  "mission_hidden_dim": 128,
+  "attention": true,
+  "features_dim": 256,
+  "recurrent_hidden_dim": 256,
+  "tile_vocab_sizes": {
+    "object": 16,
+    "color": 16,
+    "state": 8
+  }
+}

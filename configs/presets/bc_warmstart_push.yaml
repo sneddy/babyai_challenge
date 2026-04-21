@@ -1,0 +1,18 @@
+{
+  "training": {
+    "total_timesteps": 1000000,
+    "eval_freq": 25000
+  },
+  "ppo": {
+    "learning_rate": 0.00001,
+    "end_learning_rate": 0.0000001,
+    "learning_rate_period": 100000,
+    "n_steps": 256,
+    "batch_size": 128,
+    "n_epochs": 4,
+    "ent_coef": 0.01
+  },
+  "curriculum": {
+    "sampling_uniform_alpha": 0.1
+  }
+}

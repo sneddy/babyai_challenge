@@ -1,0 +1,395 @@
+# BabyAI Training History
+
+## 1. Minimalistic RL baseline
+
+Initial approach: a minimalistic feedforward PPO policy.
+
+Training path:
+- first trained RL on the first env,
+- then expanded to all easy envs with sampling,
+- resulting artifact: `sneddy_baby_ai/artifacts/exports/goto_easy_minimalistic_best.pt`
+
+Known outcome:
+- this solved the simpler easy tasks reasonably well,
+- but did not solve `PutNextLocal`,
+- the key limitation was not data quality, but insufficient temporal memory in the policy.
+
+Checkpoint:
+- `sneddy_baby_ai/artifacts/exports/goto_easy_minimalistic_best.pt`
+
+Metadata recovered from export:
+- run name: `goto_easy_minimalistic`
+- algorithm: `ppo`
+- config: `minimalistic_finetune`
+- seed: `42`
+- train/eval envs:
+  - `BabyAI-GoToObj-v0`
+  - `BabyAI-GoToLocal-v0`
+  - `BabyAI-GoToRedBallGrey-v0`
+  - `BabyAI-PickupLoc-v0`
+  - `BabyAI-PutNextLocal-v0`
+
+Model config:
+```json
+{
+  "action_dim": 7,
+  "image_embedding_dim": 96,
+  "mission_embedding_dim": 32,
+  "mission_hidden_dim": 64,
+  "attention": false,
+  "features_dim": 128,
+  "recurrent_hidden_dim": 128,
+  "tile_vocab_sizes": {
+    "object": 16,
+    "color": 16,
+    "state": 8
+  }
+}
+```
+
+Optim config:
+```json
+{
+  "algorithm": "ppo",
+  "config_name": "minimalistic_finetune",
+  "learning_rate": 5e-05,
+  "n_steps": 256,
+  "batch_size": 512,
+  "n_epochs": 4,
+  "gamma": 0.99,
+  "gae_lambda": 0.99,
+  "clip_range": 0.2,
+  "ent_coef": 0.005,
+  "vf_coef": 0.5,
+  "max_grad_norm": 0.5,
+  "sampling_uniform_alpha": 0.1
+}
+```
+
+## 2. Switch to supervised pretraining with a larger model
+
+After seeing that the minimalistic RL path did not fix `PutNextLocal`, the next approach was supervised pretraining on expert demonstrations.
+
+Reason for the switch:
+- BC converged much more reliably than direct RL,
+- once that worked, the model capacity was increased from `minimalistic` to `advance`.
+
+### 2.1 Easy-only BC pretrain
+
+Goal:
+- train a larger feedforward policy on easy-tier demos only.
+
+Main checkpoint:
+- `sneddy_baby_ai/artifacts/exports/advance_bc_easy_best.pt`
+
+Observed result:
+- strong improvement on easy tasks,
+- `PutNextLocal` still remained weak.
+
+Model config:
+```json
+{
+  "action_dim": 7,
+  "image_embedding_dim": 160,
+  "mission_embedding_dim": 80,
+  "mission_hidden_dim": 160,
+  "attention": true,
+  "features_dim": 320,
+  "recurrent_hidden_dim": 320,
+  "tile_vocab_sizes": {
+    "object": 16,
+    "color": 16,
+    "state": 8
+  }
+}
+```
+
+Optim config:
+```json
+{
+  "algorithm": "behavior_cloning",
+  "config_name": "bc_easy",
+  "epochs": 16,
+  "batch_size": 1024,
+  "learning_rate": 1e-04,
+  "weight_decay": 1e-06,
+  "clip_grad_norm": 0.5,
+  "min_sampling_proba": 0.1,
+  "n_eval_episodes": 12
+}
+```
+
+### 2.2 Easy BC finetune
+
+This was the follow-up easy finetune pass that continued from the previous easy BC checkpoint.
+
+Script:
+- `scripts/01_train_bc_easy_finetune_advance.sh`
+
+Warm start:
+- `sneddy_baby_ai/artifacts/exports/advance_bc_easy_best.pt`
+
+Produced checkpoint:
+- `sneddy_baby_ai/artifacts/exports/advance_bc_easy_v2_best.pt`
+
+Train demos:
+- easy tier only:
+  - `gotoobj`
+  - `gotolocal`
+  - `gotoredballgrey`
+  - `pickuploc`
+  - `putnextlocal`
+
+Model config:
+```json
+{
+  "action_dim": 7,
+  "image_embedding_dim": 160,
+  "mission_embedding_dim": 80,
+  "mission_hidden_dim": 160,
+  "attention": true,
+  "features_dim": 320,
+  "recurrent_hidden_dim": 320,
+  "tile_vocab_sizes": {
+    "object": 16,
+    "color": 16,
+    "state": 8
+  }
+}
+```
+
+Optim config:
+```json
+{
+  "algorithm": "behavior_cloning",
+  "config_name": "bc_easy_finetune",
+  "epochs": 5,
+  "batch_size": 1024,
+  "learning_rate": 1e-05,
+  "weight_decay": 1e-06,
+  "clip_grad_norm": 0.5,
+  "min_sampling_proba": 0.1,
+  "n_eval_episodes": 10,
+  "warm_start": "sneddy_baby_ai/artifacts/exports/advance_bc_easy_best.pt"
+}
+```
+
+## 3. Larger supervised curriculum over more envs
+
+### 3.1 Easy + moderate BC
+
+Goal:
+- extend the stronger BC initialization to the moderate tier.
+
+Checkpoint:
+- `sneddy_baby_ai/artifacts/exports/advance_bc_easy_moderate_v1_best.pt`
+
+Script:
+- `scripts/02_train_bc_easy_moderate_advance.sh`
+
+Warm start:
+- `sneddy_baby_ai/artifacts/exports/advance_bc_easy_v2_best.pt`
+
+Train demos:
+- all easy demos,
+- plus moderate demos:
+  - `gotoredball`
+  - `gotoobjmaze`
+  - `goto`
+  - `pickup`
+  - `open`
+
+Model config:
+```json
+{
+  "action_dim": 7,
+  "image_embedding_dim": 160,
+  "mission_embedding_dim": 80,
+  "mission_hidden_dim": 160,
+  "attention": true,
+  "features_dim": 320,
+  "recurrent_hidden_dim": 320,
+  "tile_vocab_sizes": {
+    "object": 16,
+    "color": 16,
+    "state": 8
+  }
+}
+```
+
+Optim config:
+```json
+{
+  "algorithm": "behavior_cloning",
+  "config_name": "bc_moderate",
+  "epochs": 5,
+  "batch_size": 512,
+  "learning_rate": 2e-05,
+  "weight_decay": 0.0,
+  "clip_grad_norm": 0.5,
+  "min_sampling_proba": 0.1,
+  "n_eval_episodes": 20,
+  "warm_start": "sneddy_baby_ai/artifacts/exports/advance_bc_easy_v2_best.pt"
+}
+```
+
+### 3.2 All tiers BC
+
+Goal:
+- build a single larger BC checkpoint over easy + moderate + hard tiers.
+
+Checkpoint:
+- `sneddy_baby_ai/artifacts/exports/advance_bc_all_tiers_v1_best.pt`
+
+Script:
+- `scripts/03_train_bc_all_tiers_advance.sh`
+
+Warm start:
+- `sneddy_baby_ai/artifacts/exports/advance_bc_easy_moderate_v1.pt`
+
+Train demos:
+- all easy demos,
+- all moderate demos,
+- hard demos:
+  - `unlock`
+  - `unblockpickup`
+  - `putnexts7n4`
+  - `synth`
+  - `synthloc`
+
+Model config:
+```json
+{
+  "action_dim": 7,
+  "image_embedding_dim": 160,
+  "mission_embedding_dim": 80,
+  "mission_hidden_dim": 160,
+  "attention": true,
+  "features_dim": 320,
+  "recurrent_hidden_dim": 320,
+  "tile_vocab_sizes": {
+    "object": 16,
+    "color": 16,
+    "state": 8
+  }
+}
+```
+
+Optim config:
+```json
+{
+  "algorithm": "behavior_cloning",
+  "config_name": "bc_hard",
+  "epochs": 5,
+  "batch_size": 512,
+  "learning_rate": 1e-05,
+  "weight_decay": 0.0,
+  "clip_grad_norm": 0.5,
+  "min_sampling_proba": 0.1,
+  "sampling_episode_budget_per_task": 1000,
+  "n_eval_episodes": 20,
+  "warm_start": "sneddy_baby_ai/artifacts/exports/advance_bc_easy_moderate_v1.pt"
+}
+```
+
+## 4. Why `PutNextLocal` still failed
+
+Key conclusion from the code-level debug:
+- demos were valid,
+- there was no action-label shift,
+- mission tokenization was not broken,
+- success criterion was correct,
+- the actual issue was architectural.
+
+Root cause:
+- `PutNextLocal` was not failing because of broken data,
+- it was failing because the policy had no memory,
+- all checkpoints above were pure feedforward per-step policies.
+
+Why this matters specifically for `PutNextLocal`:
+- `PickupLoc` can often be solved reactively from the current observation,
+- `PutNextLocal` has a two-stage dependency:
+  - find and pick object `X`,
+  - then place it next to object `Y`,
+- after pickup, the agent must still preserve task-relevant context across later timesteps.
+
+In short:
+- feedforward policy: action is computed only from the current encoded observation,
+- recurrent policy: action is computed from the current observation plus a learned hidden state carried across timesteps.
+
+## 5. Next step: add memory / recurrence
+
+Current direction:
+- move from feedforward BC to recurrent BC for `PutNextLocal`.
+
+What changed in the model:
+- previously:
+  - `encoder(obs_t) -> actor/critic`,
+  - no persistent hidden state,
+  - each step treated independently.
+- now:
+  - `encoder(obs_t) -> LSTMCell(hidden_{t-1}, cell_{t-1}) -> actor/critic`,
+  - hidden state is passed from one step to the next,
+  - training is done on full episodes rather than shuffled independent transitions.
+
+This is a model-level difference, not a demo-format change.
+
+Important note:
+- demos do not need to be regenerated for this fix,
+- the existing expert trajectories were already valid,
+- the missing component was temporal state inside the policy.
+
+Current recurrent entrypoint:
+- `scripts/05_train_putnextlocal_recurrent_bc.sh`
+
+Current recurrent warm start:
+- `sneddy_baby_ai/artifacts/exports/advance_bc_easy_v2_best.pt`
+
+Seeded recurrent checkpoint:
+- `sneddy_baby_ai/artifacts/exports/putnextlocal_recurrent_bc_best.pt`
+
+Model config:
+```json
+{
+  "action_dim": 7,
+  "image_embedding_dim": 160,
+  "mission_embedding_dim": 80,
+  "mission_hidden_dim": 160,
+  "attention": true,
+  "features_dim": 320,
+  "recurrent_hidden_dim": 320,
+  "tile_vocab_sizes": {
+    "object": 16,
+    "color": 16,
+    "state": 8
+  }
+}
+```
+
+Optim config:
+```json
+{
+  "algorithm": "behavior_cloning",
+  "config_name": "bc_easy",
+  "epochs": 16,
+  "batch_size": 1024,
+  "effective_episode_batch_size": "derived from mean episode length",
+  "learning_rate": 1e-04,
+  "weight_decay": 1e-06,
+  "clip_grad_norm": 0.5,
+  "min_sampling_proba": 0.1,
+  "n_eval_episodes": 12,
+  "recurrent": true,
+  "warm_start": "sneddy_baby_ai/artifacts/exports/advance_bc_easy_v2_best.pt"
+}
+```
+
+## 6. Practical report summary
+
+Short narrative for a report:
+- minimalistic RL worked as a useful baseline but did not solve `PutNextLocal`,
+- supervised pretraining with a larger `advance` model improved most tasks significantly,
+- scaling BC from easy to moderate to all tiers still left `PutNextLocal` unresolved,
+- code-level debugging showed the failure was not caused by demos or label alignment,
+- the real bottleneck was the lack of temporal memory in the policy,
+- the next correct step is recurrent BC, where the same visual/language encoder is augmented with an LSTM memory state and trained on whole trajectories.

@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# External repositories and reference material.
+babyai/
+babyai-ml8103-leaderboard-2026/
+papers/
+summaries/
+new_solution/
+
+# Training artifacts and generated outputs.
+sneddy_baby_ai/artifacts/
+submissions/
+evaluation/
+demo_submission/model/
+demo_submission/__pycache__/
+
+# Local notes and scratch files.
+ideas.md
