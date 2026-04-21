@@ -27,6 +27,8 @@
     "learning_rate": 0.0001,
     "weight_decay": 0.0,
     "clip_grad_norm": 0.5,
+    "aux_weight": null,
+    "action_reweight_on_holding_target": 1.0,
     "min_sampling_proba": 0.1,
     "sampling_episode_budget_per_task": null
   },

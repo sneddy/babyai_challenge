@@ -9,9 +9,12 @@ from pathlib import Path
 import gymnasium as gym
 import numpy as np
 import torch
+import torch.nn.functional as F
 from stable_baselines3.common.callbacks import BaseCallback
 from tqdm.auto import tqdm
 
+from ..auxiliary.labels import build_aux_targets
+from ..auxiliary.specs import AuxHeadSpec
 from ..common.constants import EVAL_TRAIN_SEED_BASE, EVAL_VAL_SEED_BASE
 from ..envs.runtime import ensure_babyai_envs_registered, suppress_noisy_env_output
 from ..envs.wrappers import TokenizedMissionWrapper
@@ -32,7 +35,7 @@ def create_progress_bar(total: int, desc: str, unit: str = "ts"):
     return tqdm(total=total, desc=desc, unit=unit)
 
 
-def _evaluate_on_seeds(model, env_name: str, vocab, seeds: list[int], max_steps: int = 1000) -> tuple[float, float]:
+def _evaluate_on_seeds(model, env_name: str, vocab, seeds: list[int], max_steps: int = 1000) -> tuple[float, float, dict[str, float]]:
     ensure_babyai_envs_registered()
     with suppress_noisy_env_output():
         env = gym.make(env_name)
@@ -59,10 +62,10 @@ def _evaluate_on_seeds(model, env_name: str, vocab, seeds: list[int], max_steps:
 
     success_rate = float(np.mean(successes) if successes else 0.0)
     mean_length = float(np.mean(lengths) if lengths else 0.0)
-    return success_rate, mean_length
+    return success_rate, mean_length, {}
 
 
-def evaluate_torch_policy_on_seeds(policy, env_name: str, vocab, seeds: list[int], device="cpu", max_steps: int = 1000) -> tuple[float, float]:
+def evaluate_torch_policy_on_seeds(policy, env_name: str, vocab, seeds: list[int], device="cpu", max_steps: int = 1000) -> tuple[float, float, dict[str, float]]:
     ensure_babyai_envs_registered()
     with suppress_noisy_env_output():
         env = gym.make(env_name)
@@ -70,6 +73,13 @@ def evaluate_torch_policy_on_seeds(policy, env_name: str, vocab, seeds: list[int
     successes: list[int] = []
     lengths: list[int] = []
     device = torch.device(device)
+
+    aux_specs: tuple[AuxHeadSpec, ...] = tuple(getattr(policy, "aux_specs", ()))
+    aux_totals: dict[str, float] = {}
+    for spec in aux_specs:
+        aux_totals[f"{spec.name}_loss_sum"] = 0.0
+        aux_totals[f"{spec.name}_acc_sum"] = 0.0
+        aux_totals[f"{spec.name}_active"] = 0.0
 
     try:
         for seed in seeds:
@@ -85,10 +95,20 @@ def evaluate_torch_policy_on_seeds(policy, env_name: str, vocab, seeds: list[int
                     "mission_tokens": torch.as_tensor(obs["mission_tokens"], device=device).unsqueeze(0),
                     "mission_mask": torch.as_tensor(obs["mission_mask"], device=device).unsqueeze(0),
                 }
-                if state is None:
-                    action, _value = policy.act(tensor_obs, deterministic=True)
+                if aux_specs and hasattr(policy, "forward_with_aux"):
+                    labels, masks = build_aux_targets(env.unwrapped, aux_specs)
+                    if state is None:
+                        logits, _value, aux_predictions = policy.forward_with_aux(tensor_obs)
+                        action = logits.argmax(dim=-1)
+                    else:
+                        logits, _value, state, aux_predictions = policy.forward_with_aux(tensor_obs, state=state)
+                        action = logits.argmax(dim=-1)
+                    _update_aux_eval_totals(aux_totals, aux_predictions, labels, masks, aux_specs)
                 else:
-                    action, _value, state = policy.act(tensor_obs, state=state, deterministic=True)
+                    if state is None:
+                        action, _value = policy.act(tensor_obs, deterministic=True)
+                    else:
+                        action, _value, state = policy.act(tensor_obs, state=state, deterministic=True)
                 obs, reward, terminated, truncated, _ = env.step(int(action.item()))
                 done = terminated or truncated
                 steps += 1
@@ -99,7 +119,47 @@ def evaluate_torch_policy_on_seeds(policy, env_name: str, vocab, seeds: list[int
 
     success_rate = float(np.mean(successes) if successes else 0.0)
     mean_length = float(np.mean(lengths) if lengths else 0.0)
-    return success_rate, mean_length
+    metrics = _finalize_aux_eval_totals(aux_totals, aux_specs)
+    return success_rate, mean_length, metrics
+
+
+def _update_aux_eval_totals(
+    aux_totals: dict[str, float],
+    aux_predictions: dict[str, torch.Tensor],
+    labels: dict[str, int],
+    masks: dict[str, int],
+    aux_specs: tuple[AuxHeadSpec, ...],
+) -> None:
+    for spec in aux_specs:
+        if not masks.get(spec.name, 0):
+            continue
+        prediction = aux_predictions[spec.name]
+        target_value = labels[spec.name]
+        if spec.head_type == "binary":
+            target = torch.tensor([float(target_value)], device=prediction.device)
+            loss = F.binary_cross_entropy_with_logits(prediction.reshape(-1), target, reduction="mean")
+            acc = float(((prediction.reshape(-1) > 0).float() == target).float().mean().item())
+        else:
+            target = torch.tensor([int(target_value)], device=prediction.device, dtype=torch.long)
+            loss = F.cross_entropy(prediction, target, reduction="mean")
+            acc = float((prediction.argmax(dim=-1) == target).float().mean().item())
+        aux_totals[f"{spec.name}_loss_sum"] += float(loss.item())
+        aux_totals[f"{spec.name}_acc_sum"] += acc
+        aux_totals[f"{spec.name}_active"] += 1.0
+
+
+def _finalize_aux_eval_totals(aux_totals: dict[str, float], aux_specs: tuple[AuxHeadSpec, ...]) -> dict[str, float]:
+    metrics: dict[str, float] = {}
+    for spec in aux_specs:
+        active = aux_totals.get(f"{spec.name}_active", 0.0)
+        if active > 0:
+            metrics[f"{spec.name}_loss"] = aux_totals[f"{spec.name}_loss_sum"] / active
+            metrics[f"{spec.name}_acc"] = aux_totals[f"{spec.name}_acc_sum"] / active
+        else:
+            metrics[f"{spec.name}_loss"] = 0.0
+            metrics[f"{spec.name}_acc"] = 0.0
+        metrics[f"{spec.name}_active"] = active
+    return metrics
 
 
 def compute_adaptive_env_sampling_weights(
@@ -158,14 +218,18 @@ def evaluate_env_suite(
         val_seed_base = EVAL_VAL_SEED_BASE + seed
         train_seeds = [train_seed_base + env_index * 1_000 + i for i in range(n_eval_episodes)]
         val_seeds = [val_seed_base + env_index * 1_000 + i for i in range(n_eval_episodes)]
-        train_success_rate, train_mean_length = predictor(env_name, train_seeds, max_steps)
-        val_success_rate, val_mean_length = predictor(env_name, val_seeds, max_steps)
+        train_success_rate, train_mean_length, train_aux_metrics = predictor(env_name, train_seeds, max_steps)
+        val_success_rate, val_mean_length, val_aux_metrics = predictor(env_name, val_seeds, max_steps)
         env_metrics[env_name] = {
             "train_success_rate": train_success_rate,
             "val_success_rate": val_success_rate,
             "train_mean_length": train_mean_length,
             "val_mean_length": val_mean_length,
         }
+        for key, value in train_aux_metrics.items():
+            env_metrics[env_name][f"train_{key}"] = value
+        for key, value in val_aux_metrics.items():
+            env_metrics[env_name][f"val_{key}"] = value
         if on_env_complete is not None:
             on_env_complete(env_name, env_metrics[env_name], env_index, len(env_names))
         train_success_rates.append(train_success_rate)

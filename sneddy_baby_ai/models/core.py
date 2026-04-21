@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ..auxiliary.specs import AuxHeadSpec
 from ..common.constants import DEFAULT_ACTION_DIM, DEFAULT_IMAGE_CHANNEL_VOCABS
 
 
@@ -195,21 +196,53 @@ class BabyAIEncoder(nn.Module):
         return self.output_proj(pooled)
 
 
+class AuxiliaryHeadSet(nn.Module):
+    """Training-only auxiliary prediction heads."""
+
+    def __init__(self, input_dim: int, aux_specs: tuple[AuxHeadSpec, ...]) -> None:
+        super().__init__()
+        self.specs = tuple(aux_specs)
+        self.heads = nn.ModuleDict(
+            {
+                spec.name: nn.Linear(input_dim, spec.output_dim)
+                for spec in self.specs
+            }
+        )
+
+    def forward(self, features: torch.Tensor) -> dict[str, torch.Tensor]:
+        return {name: head(features) for name, head in self.heads.items()}
+
+
 class BabyAIFeedForwardPolicy(nn.Module):
     """Pure PyTorch actor-critic model for submission export."""
 
-    def __init__(self, vocab_size: int, config: ModelConfig, pad_id: int = 0) -> None:
+    def __init__(
+        self,
+        vocab_size: int,
+        config: ModelConfig,
+        pad_id: int = 0,
+        aux_specs: tuple[AuxHeadSpec, ...] = (),
+    ) -> None:
         super().__init__()
         self.config = config
+        self.aux_specs = tuple(aux_specs)
         self.encoder = BabyAIEncoder(vocab_size=vocab_size, config=config, pad_id=pad_id)
         self.actor = nn.Linear(config.features_dim, config.action_dim)
         self.critic = nn.Linear(config.features_dim, 1)
+        self.aux_heads = AuxiliaryHeadSet(config.features_dim, self.aux_specs) if self.aux_specs else None
 
     def forward(self, obs: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         features = self.encoder(obs)
         logits = self.actor(features)
         value = self.critic(features).squeeze(-1)
         return logits, value
+
+    def forward_with_aux(self, obs: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        features = self.encoder(obs)
+        logits = self.actor(features)
+        value = self.critic(features).squeeze(-1)
+        aux_predictions = self.aux_heads(features) if self.aux_heads is not None else {}
+        return logits, value, aux_predictions
 
     @torch.no_grad()
     def act(self, obs: dict[str, torch.Tensor], deterministic: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
@@ -221,17 +254,38 @@ class BabyAIFeedForwardPolicy(nn.Module):
             action = probs.sample()
         return action, value
 
+    def export_state_dict(self) -> dict[str, torch.Tensor]:
+        return {key: value for key, value in self.state_dict().items() if not key.startswith("aux_heads.")}
+
+    def auxiliary_state_dict(self) -> dict[str, torch.Tensor]:
+        if self.aux_heads is None:
+            return {}
+        return self.aux_heads.state_dict()
+
+    def load_auxiliary_state(self, aux_state: dict[str, torch.Tensor] | None) -> None:
+        if self.aux_heads is None or not aux_state:
+            return
+        self.aux_heads.load_state_dict(aux_state, strict=False)
+
 
 class BabyAIRecurrentPolicy(nn.Module):
     """Pure PyTorch recurrent policy used for export-safe inference."""
 
-    def __init__(self, vocab_size: int, config: ModelConfig, pad_id: int = 0) -> None:
+    def __init__(
+        self,
+        vocab_size: int,
+        config: ModelConfig,
+        pad_id: int = 0,
+        aux_specs: tuple[AuxHeadSpec, ...] = (),
+    ) -> None:
         super().__init__()
         self.config = config
+        self.aux_specs = tuple(aux_specs)
         self.encoder = BabyAIEncoder(vocab_size=vocab_size, config=config, pad_id=pad_id)
         self.core = nn.LSTMCell(config.features_dim, config.recurrent_hidden_dim)
         self.actor = nn.Linear(config.recurrent_hidden_dim, config.action_dim)
         self.critic = nn.Linear(config.recurrent_hidden_dim, 1)
+        self.aux_heads = AuxiliaryHeadSet(config.recurrent_hidden_dim, self.aux_specs) if self.aux_specs else None
 
     def initial_state(self, batch_size: int, device: torch.device | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         device = device or torch.device("cpu")
@@ -252,6 +306,20 @@ class BabyAIRecurrentPolicy(nn.Module):
         value = self.critic(hidden).squeeze(-1)
         return logits, value, (hidden, cell)
 
+    def forward_with_aux(
+        self,
+        obs: dict[str, torch.Tensor],
+        state: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor], dict[str, torch.Tensor]]:
+        features = self.encoder(obs)
+        if state is None:
+            state = self.initial_state(features.shape[0], features.device)
+        hidden, cell = self.core(features, state)
+        logits = self.actor(hidden)
+        value = self.critic(hidden).squeeze(-1)
+        aux_predictions = self.aux_heads(hidden) if self.aux_heads is not None else {}
+        return logits, value, (hidden, cell), aux_predictions
+
     @torch.no_grad()
     def act(
         self,
@@ -266,6 +334,19 @@ class BabyAIRecurrentPolicy(nn.Module):
             probs = torch.distributions.Categorical(logits=logits)
             action = probs.sample()
         return action, value, next_state
+
+    def export_state_dict(self) -> dict[str, torch.Tensor]:
+        return {key: value for key, value in self.state_dict().items() if not key.startswith("aux_heads.")}
+
+    def auxiliary_state_dict(self) -> dict[str, torch.Tensor]:
+        if self.aux_heads is None:
+            return {}
+        return self.aux_heads.state_dict()
+
+    def load_auxiliary_state(self, aux_state: dict[str, torch.Tensor] | None) -> None:
+        if self.aux_heads is None or not aux_state:
+            return
+        self.aux_heads.load_state_dict(aux_state, strict=False)
 
 
 def tensorize_observation(obs: dict[str, Any], device: torch.device | str | None = None) -> dict[str, torch.Tensor]:
@@ -287,16 +368,20 @@ def save_exported_checkpoint(
     model_config: ModelConfig,
     vocab_payload: dict[str, Any],
     recurrent: bool,
+    aux_state: dict[str, torch.Tensor] | None = None,
+    aux_config: dict[str, Any] | None = None,
 ) -> None:
-    torch.save(
-        {
-            "policy_state": policy_state,
-            "model_config": model_config.to_dict(),
-            "vocab": vocab_payload,
-            "recurrent": recurrent,
-        },
-        path,
-    )
+    payload = {
+        "policy_state": policy_state,
+        "model_config": model_config.to_dict(),
+        "vocab": vocab_payload,
+        "recurrent": recurrent,
+    }
+    if aux_state:
+        payload["aux_state"] = aux_state
+    if aux_config:
+        payload["aux_config"] = aux_config
+    torch.save(payload, path)
 
 
 def load_exported_checkpoint(path: str, map_location: str | torch.device = "cpu") -> dict[str, Any]:

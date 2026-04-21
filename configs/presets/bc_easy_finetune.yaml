@@ -3,7 +3,7 @@
     "n_eval_episodes": 10
   },
   "bc": {
-    "epochs": 5,
+    "epochs": 20,
     "batch_size": 1024,
     "learning_rate": 0.00001,
     "weight_decay": 0.000001,

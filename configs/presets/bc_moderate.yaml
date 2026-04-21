@@ -4,9 +4,11 @@
   },
   "bc": {
     "epochs": 5,
-    "batch_size": 512,
-    "learning_rate": 0.00002,
+    "batch_size": 256,
+    "learning_rate": 0.0003,
     "weight_decay": 0.0,
+    "aux_weight": 2.0,
+    "action_reweight_on_holding_target": 2.0,
     "min_sampling_proba": 0.1
   }
 }

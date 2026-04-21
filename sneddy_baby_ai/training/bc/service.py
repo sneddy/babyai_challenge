@@ -13,6 +13,8 @@ from stable_baselines3 import PPO
 from torch.utils.data import ConcatDataset, DataLoader, Subset, random_split
 from tqdm.auto import tqdm
 
+from ...auxiliary.losses import compute_auxiliary_loss
+from ...auxiliary.specs import AuxHeadSpec, apply_aux_weight, get_aux_specs
 from ..evaluation import (
     evaluate_env_suite,
     evaluate_torch_policy_on_seeds,
@@ -25,6 +27,7 @@ from ...models.core import (
     BabyAIFeedForwardPolicy,
     BabyAIRecurrentPolicy,
     ModelConfig,
+    load_exported_checkpoint,
     save_exported_checkpoint,
 )
 from ...models.transfer import (
@@ -41,15 +44,24 @@ def _save_bc_checkpoint(
     model_config: ModelConfig,
     vocab: MissionVocabulary,
     recurrent: bool,
+    aux_specs: tuple[AuxHeadSpec, ...] = (),
+    aux_preset: str | None = None,
 ) -> None:
     checkpoint_path = Path(path)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    export_state = model.export_state_dict() if hasattr(model, "export_state_dict") else model.state_dict()
+    aux_state = model.auxiliary_state_dict() if hasattr(model, "auxiliary_state_dict") else {}
     save_exported_checkpoint(
         str(checkpoint_path),
-        policy_state=model.state_dict(),
+        policy_state=export_state,
         model_config=model_config,
         vocab_payload=vocab.to_dict(),
         recurrent=recurrent,
+        aux_state=aux_state,
+        aux_config={
+            "preset": aux_preset,
+            "heads": [spec.to_dict() for spec in aux_specs],
+        } if aux_specs else None,
     )
 
 
@@ -138,13 +150,18 @@ class EpisodeDataset:
 
     def __getitem__(self, index: int) -> dict[str, np.ndarray]:
         start, end = self.ranges[self.episode_ids[index]]
-        return {
+        sample = {
             "image": self.batch.image[start:end],
             "mission_tokens": self.batch.mission_tokens[start:end],
             "mission_mask": self.batch.mission_mask[start:end],
             "action": self.batch.action[start:end],
             "done": self.batch.done[start:end],
         }
+        if self.batch.aux_targets:
+            sample["aux_targets"] = {name: values[start:end] for name, values in self.batch.aux_targets.items()}
+        if self.batch.aux_masks:
+            sample["aux_masks"] = {name: values[start:end] for name, values in self.batch.aux_masks.items()}
+        return sample
 
 
 def _collate_episode_batch(samples):
@@ -163,6 +180,23 @@ def _collate_episode_batch(samples):
             value = torch.as_tensor(sample[key])
             padded[sample_index, : value.shape[0]] = value
         batch[key] = padded
+
+    aux_target_names = sorted(samples[0].get("aux_targets", {}))
+    if aux_target_names:
+        batch["aux_targets"] = {}
+        batch["aux_masks"] = {}
+        for name in aux_target_names:
+            first_target = torch.as_tensor(samples[0]["aux_targets"][name])
+            padded_targets = torch.zeros((batch_size, max_len, *first_target.shape[1:]), dtype=first_target.dtype)
+            first_mask = torch.as_tensor(samples[0]["aux_masks"][name])
+            padded_masks = torch.zeros((batch_size, max_len, *first_mask.shape[1:]), dtype=first_mask.dtype)
+            for sample_index, sample in enumerate(samples):
+                target_value = torch.as_tensor(sample["aux_targets"][name])
+                mask_value = torch.as_tensor(sample["aux_masks"][name])
+                padded_targets[sample_index, : target_value.shape[0]] = target_value
+                padded_masks[sample_index, : mask_value.shape[0]] = mask_value
+            batch["aux_targets"][name] = padded_targets
+            batch["aux_masks"][name] = padded_masks
 
     return batch
 
@@ -312,18 +346,201 @@ def _build_weighted_episode_train_loader(
     return loader
 
 
-def _compute_recurrent_bc_batch_metrics(model, batch):
+def _validate_aux_supervision(batch: DemoBatch, aux_specs: tuple[AuxHeadSpec, ...], *, source: str) -> None:
+    if not aux_specs:
+        return
+    required_names = {spec.name for spec in aux_specs}
+    missing_targets = sorted(required_names.difference(batch.aux_targets))
+    missing_masks = sorted(required_names.difference(batch.aux_masks))
+    if missing_targets or missing_masks:
+        raise RuntimeError(
+            f"Missing auxiliary supervision in {source}: "
+            f"targets={missing_targets or 'ok'} masks={missing_masks or 'ok'}"
+        )
+
+
+def _init_aux_metric_totals(aux_specs: tuple[AuxHeadSpec, ...]) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for spec in aux_specs:
+        totals[f"{spec.name}_weighted_loss_sum"] = 0.0
+        totals[f"{spec.name}_weighted_acc_sum"] = 0.0
+        totals[f"{spec.name}_active"] = 0.0
+    return totals
+
+
+def _accumulate_aux_metric_totals(
+    totals: dict[str, float],
+    batch_metrics: dict[str, float],
+    aux_specs: tuple[AuxHeadSpec, ...],
+) -> None:
+    for spec in aux_specs:
+        active = float(batch_metrics.get(f"{spec.name}_active", 0.0))
+        totals[f"{spec.name}_active"] += active
+        totals[f"{spec.name}_weighted_loss_sum"] += float(batch_metrics.get(f"{spec.name}_loss", 0.0)) * active
+        totals[f"{spec.name}_weighted_acc_sum"] += float(batch_metrics.get(f"{spec.name}_acc", 0.0)) * active
+
+
+def _finalize_aux_metric_totals(
+    totals: dict[str, float],
+    aux_specs: tuple[AuxHeadSpec, ...],
+    denom_count: float,
+) -> dict[str, float]:
+    metrics: dict[str, float] = {}
+    denom = max(float(denom_count), 1.0)
+    for spec in aux_specs:
+        active = totals.get(f"{spec.name}_active", 0.0)
+        if active > 0:
+            metrics[f"{spec.name}_loss"] = totals[f"{spec.name}_weighted_loss_sum"] / active
+            metrics[f"{spec.name}_acc"] = totals[f"{spec.name}_weighted_acc_sum"] / active
+        else:
+            metrics[f"{spec.name}_loss"] = 0.0
+            metrics[f"{spec.name}_acc"] = 0.0
+        metrics[f"{spec.name}_active"] = active
+        metrics[f"{spec.name}_active_fraction"] = active / denom
+    return metrics
+
+
+def _print_aux_head_metrics(prefix: str, metrics: dict[str, float], aux_specs: tuple[AuxHeadSpec, ...]) -> None:
+    if not aux_specs:
+        return
+    for spec in aux_specs:
+        print(
+            f"{prefix} {spec.name}: "
+            f"loss={metrics.get(f'{spec.name}_loss', 0.0):.4f} "
+            f"acc={metrics.get(f'{spec.name}_acc', 0.0):.2%}"
+        )
+
+
+def _print_aux_head_train_val_metrics(
+    prefix: str,
+    train_metrics: dict[str, float],
+    val_metrics: dict[str, float],
+    aux_specs: tuple[AuxHeadSpec, ...],
+) -> None:
+    if not aux_specs:
+        return
+    for spec in aux_specs:
+        print(
+            f"{prefix} {spec.name}: "
+            f"train_acc={train_metrics.get(f'{spec.name}_acc', 0.0):.2%} "
+            f"train_loss={train_metrics.get(f'{spec.name}_loss', 0.0):.4f} "
+            f"val_acc={val_metrics.get(f'{spec.name}_acc', 0.0):.2%} "
+            f"val_loss={val_metrics.get(f'{spec.name}_loss', 0.0):.4f}"
+        )
+
+
+def _aggregate_env_aux_metrics(
+    env_metrics: dict[str, dict[str, float]],
+    aux_specs: tuple[AuxHeadSpec, ...],
+    split_prefix: str,
+) -> dict[str, float]:
+    aggregated: dict[str, float] = {}
+    for spec in aux_specs:
+        active_key = f"{split_prefix}_{spec.name}_active"
+        loss_key = f"{split_prefix}_{spec.name}_loss"
+        acc_key = f"{split_prefix}_{spec.name}_acc"
+        total_active = sum(float(metrics.get(active_key, 0.0)) for metrics in env_metrics.values())
+        if total_active > 0:
+            aggregated[f"{spec.name}_loss"] = sum(
+                float(metrics.get(loss_key, 0.0)) * float(metrics.get(active_key, 0.0))
+                for metrics in env_metrics.values()
+            ) / total_active
+            aggregated[f"{spec.name}_acc"] = sum(
+                float(metrics.get(acc_key, 0.0)) * float(metrics.get(active_key, 0.0))
+                for metrics in env_metrics.values()
+            ) / total_active
+        else:
+            aggregated[f"{spec.name}_loss"] = 0.0
+            aggregated[f"{spec.name}_acc"] = 0.0
+        aggregated[f"{spec.name}_active"] = total_active
+    return aggregated
+
+
+def _action_weights_from_aux_targets(
+    *,
+    aux_targets: dict[str, torch.Tensor] | None,
+    aux_masks: dict[str, torch.Tensor] | None,
+    action_reweight_on_holding_target: float,
+    reference_tensor: torch.Tensor,
+) -> torch.Tensor:
+    weights = torch.ones_like(reference_tensor, dtype=torch.float)
+    if action_reweight_on_holding_target <= 1.0:
+        return weights
+    if aux_targets is None or aux_masks is None:
+        return weights
+    if "holding_target_object" not in aux_targets or "holding_target_object" not in aux_masks:
+        return weights
+    holding = aux_targets["holding_target_object"].reshape_as(reference_tensor).float()
+    active = aux_masks["holding_target_object"].reshape_as(reference_tensor).float()
+    weights = weights + (float(action_reweight_on_holding_target) - 1.0) * holding * active
+    return weights
+
+
+def _compute_feedforward_bc_batch_metrics(
+    model,
+    batch,
+    aux_specs: tuple[AuxHeadSpec, ...] = (),
+    action_reweight_on_holding_target: float = 1.0,
+):
+    obs = {
+        "image": batch["image"].long(),
+        "mission_tokens": batch["mission_tokens"].long(),
+        "mission_mask": batch["mission_mask"].long(),
+    }
+    if aux_specs:
+        logits, _value, aux_predictions = model.forward_with_aux(obs)
+    else:
+        logits, _value = model(obs)
+        aux_predictions = {}
+
+    targets = batch["action"].long()
+    action_weights = _action_weights_from_aux_targets(
+        aux_targets=batch.get("aux_targets"),
+        aux_masks=batch.get("aux_masks"),
+        action_reweight_on_holding_target=action_reweight_on_holding_target,
+        reference_tensor=targets,
+    )
+    per_item_action_loss = F.cross_entropy(logits, targets, reduction="none")
+    action_loss = (per_item_action_loss * action_weights).sum() / action_weights.sum().clamp_min(1.0)
+    aux_loss, aux_metrics = compute_auxiliary_loss(
+        aux_predictions=aux_predictions if aux_specs else None,
+        aux_targets=batch.get("aux_targets"),
+        aux_masks=batch.get("aux_masks"),
+        aux_specs=aux_specs,
+        device=logits.device,
+    )
+    total_loss = action_loss + aux_loss
+    predictions = logits.argmax(dim=-1)
+    batch_correct = int((predictions == targets).sum().item())
+    batch_count = int(targets.numel())
+    metrics = {
+        "action_loss": float(action_loss.item()),
+        **aux_metrics,
+    }
+    return total_loss, batch_correct, batch_count, metrics
+
+
+def _compute_recurrent_bc_batch_metrics(
+    model,
+    batch,
+    aux_specs: tuple[AuxHeadSpec, ...] = (),
+    action_reweight_on_holding_target: float = 1.0,
+):
     lengths = batch["lengths"].long()
     if lengths.numel() == 0:
         zero = torch.zeros((), device=batch["image"].device)
-        return zero, 0, 0
+        return zero, 0, 0, {"action_loss": 0.0, "aux_loss": 0.0, "aux_active": 0.0}
 
     batch_size = int(lengths.shape[0])
     max_len = int(lengths.max().item())
     state = model.initial_state(batch_size=batch_size, device=batch["image"].device)
-    total_loss = torch.zeros((), device=batch["image"].device)
+    total_action_loss = torch.zeros((), device=batch["image"].device)
+    total_action_weight = torch.zeros((), device=batch["image"].device)
+    total_aux_loss = torch.zeros((), device=batch["image"].device)
     total_correct = 0
     total_count = 0
+    total_aux_active = 0.0
+    aux_metric_totals = _init_aux_metric_totals(aux_specs)
 
     for step_index in range(max_len):
         active = lengths > step_index
@@ -335,12 +552,47 @@ def _compute_recurrent_bc_batch_metrics(model, batch):
             "mission_tokens": batch["mission_tokens"][:, step_index].long(),
             "mission_mask": batch["mission_mask"][:, step_index].long(),
         }
-        logits, _value, next_state = model(obs, state=state)
+        if aux_specs:
+            logits, _value, next_state, aux_predictions = model.forward_with_aux(obs, state=state)
+        else:
+            logits, _value, next_state = model(obs, state=state)
+            aux_predictions = {}
         targets = batch["action"][active, step_index].long()
-        total_loss = total_loss + F.cross_entropy(logits[active], targets, reduction="sum")
+        action_weights = _action_weights_from_aux_targets(
+            aux_targets={
+                name: batch["aux_targets"][name][active, step_index]
+                for name in batch.get("aux_targets", {})
+            } if batch.get("aux_targets") else None,
+            aux_masks={
+                name: batch["aux_masks"][name][active, step_index]
+                for name in batch.get("aux_masks", {})
+            } if batch.get("aux_masks") else None,
+            action_reweight_on_holding_target=action_reweight_on_holding_target,
+            reference_tensor=targets,
+        )
+        step_action_loss = F.cross_entropy(logits[active], targets, reduction="none")
+        total_action_loss = total_action_loss + (step_action_loss * action_weights).sum()
+        total_action_weight = total_action_weight + action_weights.sum()
         predictions = logits[active].argmax(dim=-1)
         total_correct += int((predictions == targets).sum().item())
         total_count += int(targets.numel())
+        if aux_specs:
+            step_aux_loss, step_aux_metrics = compute_auxiliary_loss(
+                aux_predictions={name: prediction[active] for name, prediction in aux_predictions.items()},
+                aux_targets={
+                    name: batch["aux_targets"][name][active, step_index]
+                    for name in batch.get("aux_targets", {})
+                },
+                aux_masks={
+                    name: batch["aux_masks"][name][active, step_index]
+                    for name in batch.get("aux_masks", {})
+                },
+                aux_specs=aux_specs,
+                device=logits.device,
+            )
+            total_aux_loss = total_aux_loss + step_aux_loss * max(int(targets.numel()), 1)
+            total_aux_active += step_aux_metrics.get("aux_active", 0.0)
+            _accumulate_aux_metric_totals(aux_metric_totals, step_aux_metrics, aux_specs)
 
         active_mask = active.unsqueeze(-1).to(next_state[0].dtype)
         state = (
@@ -348,8 +600,16 @@ def _compute_recurrent_bc_batch_metrics(model, batch):
             next_state[1] * active_mask + state[1] * (1.0 - active_mask),
         )
 
-    loss = total_loss / max(total_count, 1)
-    return loss, total_correct, total_count
+    action_loss = total_action_loss / total_action_weight.clamp_min(1.0)
+    aux_loss = total_aux_loss / max(total_count, 1)
+    total_loss = action_loss + aux_loss
+    metrics = {
+        "action_loss": float(action_loss.item()),
+        "aux_loss": float(aux_loss.item()),
+        "aux_active": float(total_aux_active),
+    }
+    metrics.update(_finalize_aux_metric_totals(aux_metric_totals, aux_specs, total_count))
+    return total_loss, total_correct, total_count, metrics
 
 
 def _evaluate_bc_policy(
@@ -391,6 +651,9 @@ def _evaluate_bc_policy(
 def _initialize_bc_model(model, checkpoint_path: str, device: str = "cpu") -> None:
     if checkpoint_looks_like_torch_export(checkpoint_path):
         initialize_torch_policy_from_checkpoint(model, checkpoint_path, map_location=device)
+        payload = load_exported_checkpoint(checkpoint_path, map_location=device)
+        if hasattr(model, "load_auxiliary_state"):
+            model.load_auxiliary_state(payload.get("aux_state"))
         return
 
     source_model = PPO.load(checkpoint_path, device=device)
@@ -410,18 +673,24 @@ def train_bc(
     eval_env_names: list[str] | None = None,
     min_sampling_proba: float | None = None,
     recurrent: bool = False,
+    aux_preset: str | None = None,
 ) -> None:
     torch.manual_seed(seed)
     np.random.seed(seed)
 
     config = get_config(config_name, model_preset=model_preset)
+    aux_specs = apply_aux_weight(get_aux_specs(aux_preset), config["bc"].get("aux_weight"))
+    action_reweight_on_holding_target = float(config["bc"].get("action_reweight_on_holding_target", 1.0))
     if min_sampling_proba is not None:
         config["bc"]["min_sampling_proba"] = float(min_sampling_proba)
     vocab = MissionVocabulary.load(vocab_path)
     combined_demos = load_demo_files([str(path) for path in _demo_paths(demo_path)])
+    _validate_aux_supervision(combined_demos, aux_specs, source="combined demos")
     resolved_eval_env_names = list(eval_env_names) if eval_env_names is not None else _infer_eval_env_names(demo_path)
     use_holdout_eval = bool(resolved_eval_env_names)
     demo_batches_by_env = _load_demo_batches_by_env(demo_path)
+    for env_name, batch in demo_batches_by_env.items():
+        _validate_aux_supervision(batch, aux_specs, source=env_name)
     adaptive_demo_sampling = use_holdout_eval and len(demo_batches_by_env) > 1
     weighted_sampler_generator = torch.Generator().manual_seed(seed)
     recurrent_episode_batch_size = _resolve_recurrent_episode_batch_size(
@@ -471,9 +740,9 @@ def train_bc(
 
     model_config = ModelConfig.from_dict(config["model"])
     model = (
-        BabyAIRecurrentPolicy(vocab_size=vocab.size, config=model_config, pad_id=vocab.pad_id)
+        BabyAIRecurrentPolicy(vocab_size=vocab.size, config=model_config, pad_id=vocab.pad_id, aux_specs=aux_specs)
         if recurrent
-        else BabyAIFeedForwardPolicy(vocab_size=vocab.size, config=model_config, pad_id=vocab.pad_id)
+        else BabyAIFeedForwardPolicy(vocab_size=vocab.size, config=model_config, pad_id=vocab.pad_id, aux_specs=aux_specs)
     )
     if warm_start_path:
         _initialize_bc_model(model, warm_start_path, device="cpu")
@@ -494,6 +763,13 @@ def train_bc(
     print(f"[bc] latest checkpoint path: {latest_checkpoint_path}")
     print(f"[bc] best checkpoint path: {best_checkpoint_path}")
     print(f"[bc] recurrent={recurrent}")
+    if aux_specs:
+        print(
+            f"[bc] auxiliary preset={aux_preset} aux_weight={config['bc'].get('aux_weight')} "
+            f"heads={', '.join(spec.name for spec in aux_specs)}"
+        )
+        if action_reweight_on_holding_target > 1.0:
+            print(f"[bc] action_reweight_on_holding_target={action_reweight_on_holding_target:.2f}")
     if recurrent_episode_batch_size is not None:
         print(
             f"[bc] recurrent episode batch size: {recurrent_episode_batch_size} "
@@ -521,6 +797,13 @@ def train_bc(
             f"[bc warm-start eval] train_sr={train_success_rate:.2%} "
             f"val_sr={val_success_rate:.2%}"
         )
+        if aux_specs:
+            _print_aux_head_train_val_metrics(
+                "[bc warm-start aux]",
+                _aggregate_env_aux_metrics(env_metrics, aux_specs, "train"),
+                _aggregate_env_aux_metrics(env_metrics, aux_specs, "val"),
+                aux_specs,
+            )
         env_summary = " ".join(
             f"{env_name.replace('BabyAI-', '').replace('-v0', '')}={env_metrics[env_name]['val_success_rate']:.0%}"
             for env_name in resolved_eval_env_names
@@ -536,6 +819,8 @@ def train_bc(
             model_config=model_config,
             vocab=vocab,
             recurrent=recurrent,
+            aux_specs=aux_specs,
+            aux_preset=aux_preset,
         )
         print(f"[bc] warm-start seeded best checkpoint at {best_checkpoint_path}")
 
@@ -564,56 +849,77 @@ def train_bc(
             )
         model.train()
         train_losses = []
+        train_action_losses = []
+        train_aux_losses = []
+        train_aux_metric_totals = _init_aux_metric_totals(aux_specs)
         train_correct = 0
         train_count = 0
         progress = tqdm(train_loader, desc=f"bc epoch {epoch}", leave=True)
         ema_loss: float | None = None
         ema_acc: float | None = None
+        ema_aux_loss: float | None = None
         for batch in progress:
             optimizer.zero_grad()
             if recurrent:
-                loss, batch_correct, batch_count = _compute_recurrent_bc_batch_metrics(model, batch)
+                loss, batch_correct, batch_count, batch_metrics = _compute_recurrent_bc_batch_metrics(
+                    model,
+                    batch,
+                    aux_specs=aux_specs,
+                    action_reweight_on_holding_target=action_reweight_on_holding_target,
+                )
             else:
-                obs = {
-                    "image": batch["image"].long(),
-                    "mission_tokens": batch["mission_tokens"].long(),
-                    "mission_mask": batch["mission_mask"].long(),
-                }
-                logits, _ = model(obs)
-                targets = batch["action"].long()
-                loss = torch.nn.functional.cross_entropy(logits, targets)
-                predictions = logits.argmax(dim=-1)
-                batch_correct = int((predictions == targets).sum().item())
-                batch_count = int(targets.numel())
+                loss, batch_correct, batch_count, batch_metrics = _compute_feedforward_bc_batch_metrics(
+                    model,
+                    batch,
+                    aux_specs=aux_specs,
+                    action_reweight_on_holding_target=action_reweight_on_holding_target,
+                )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), config["bc"]["clip_grad_norm"])
             optimizer.step()
             batch_loss = float(loss.item())
             train_losses.append(batch_loss)
+            train_action_losses.append(batch_metrics["action_loss"])
+            train_aux_losses.append(batch_metrics["aux_loss"])
+            _accumulate_aux_metric_totals(train_aux_metric_totals, batch_metrics, aux_specs)
             train_correct += batch_correct
             train_count += batch_count
 
             batch_acc = float(batch_correct / batch_count if batch_count else 0.0)
             ema_loss = batch_loss if ema_loss is None else 0.9 * ema_loss + 0.1 * batch_loss
             ema_acc = batch_acc if ema_acc is None else 0.9 * ema_acc + 0.1 * batch_acc
+            ema_aux_loss = (
+                batch_metrics["aux_loss"]
+                if ema_aux_loss is None
+                else 0.9 * ema_aux_loss + 0.1 * batch_metrics["aux_loss"]
+            )
             postfix = {
                 "ema_loss": f"{ema_loss:.4f}",
                 "ema_acc": f"{ema_acc:.2%}",
                 "avg_loss": f"{np.mean(train_losses):.4f}",
                 "avg_acc": f"{(train_correct / train_count) if train_count else 0.0:.2%}",
             }
+            if aux_specs:
+                postfix["ema_aux"] = f"{ema_aux_loss:.4f}"
+                postfix["avg_aux"] = f"{np.mean(train_aux_losses):.4f}"
             selected_total_episodes = getattr(train_loader, "selected_total_episodes", None)
             if selected_total_episodes is not None:
                 postfix["epoch_episodes"] = str(selected_total_episodes)
             progress.set_postfix(**postfix)
 
         train_loss = float(np.mean(train_losses) if train_losses else 0.0)
+        train_action_loss = float(np.mean(train_action_losses) if train_action_losses else 0.0)
+        train_aux_loss = float(np.mean(train_aux_losses) if train_aux_losses else 0.0)
         train_acc = float(train_correct / train_count if train_count else 0.0)
+        train_aux_head_metrics = _finalize_aux_metric_totals(train_aux_metric_totals, aux_specs, train_count)
         metrics = {
             "epoch": epoch,
             "train_loss": train_loss,
+            "train_action_loss": train_action_loss,
+            "train_aux_loss": train_aux_loss,
             "train_accuracy": train_acc,
         }
+        metrics.update(train_aux_head_metrics)
 
         if use_holdout_eval:
             model.eval()
@@ -636,6 +942,12 @@ def train_bc(
                     "best_val_success_rate": max(best_score, score),
                 }
             )
+            if aux_specs:
+                train_env_aux_metrics = _aggregate_env_aux_metrics(env_metrics, aux_specs, "train")
+                val_env_aux_metrics = _aggregate_env_aux_metrics(env_metrics, aux_specs, "val")
+                metrics.update({f"eval_train_{key}": value for key, value in train_env_aux_metrics.items()})
+                metrics.update({f"eval_val_{key}": value for key, value in val_env_aux_metrics.items()})
+                _print_aux_head_train_val_metrics(f"[bc aux eval epoch={epoch}]", train_env_aux_metrics, val_env_aux_metrics, aux_specs)
             if adaptive_demo_sampling:
                 latest_env_metrics = env_metrics
                 metrics["sampling_ratios"] = dict(getattr(train_loader, "sampling_ratios", {}))
@@ -643,37 +955,50 @@ def train_bc(
         else:
             model.eval()
             val_losses = []
+            val_action_losses = []
+            val_aux_losses = []
+            val_aux_metric_totals = _init_aux_metric_totals(aux_specs)
             val_correct = 0
             val_count = 0
             with torch.no_grad():
                 for batch in val_loader:
                     if recurrent:
-                        loss, batch_correct, batch_count = _compute_recurrent_bc_batch_metrics(model, batch)
+                        loss, batch_correct, batch_count, batch_metrics = _compute_recurrent_bc_batch_metrics(
+                            model,
+                            batch,
+                            aux_specs=aux_specs,
+                            action_reweight_on_holding_target=action_reweight_on_holding_target,
+                        )
                     else:
-                        obs = {
-                            "image": batch["image"].long(),
-                            "mission_tokens": batch["mission_tokens"].long(),
-                            "mission_mask": batch["mission_mask"].long(),
-                        }
-                        logits, _ = model(obs)
-                        targets = batch["action"].long()
-                        loss = torch.nn.functional.cross_entropy(logits, targets)
-                        predictions = logits.argmax(dim=-1)
-                        batch_correct = int((predictions == targets).sum().item())
-                        batch_count = int(targets.numel())
+                        loss, batch_correct, batch_count, batch_metrics = _compute_feedforward_bc_batch_metrics(
+                            model,
+                            batch,
+                            aux_specs=aux_specs,
+                            action_reweight_on_holding_target=action_reweight_on_holding_target,
+                        )
                     val_losses.append(float(loss.item()))
+                    val_action_losses.append(batch_metrics["action_loss"])
+                    val_aux_losses.append(batch_metrics["aux_loss"])
+                    _accumulate_aux_metric_totals(val_aux_metric_totals, batch_metrics, aux_specs)
                     val_correct += batch_correct
                     val_count += batch_count
             val_loss = float(np.mean(val_losses) if val_losses else 0.0)
+            val_action_loss = float(np.mean(val_action_losses) if val_action_losses else 0.0)
+            val_aux_loss = float(np.mean(val_aux_losses) if val_aux_losses else 0.0)
             val_acc = float(val_correct / val_count if val_count else 0.0)
+            val_aux_head_metrics = _finalize_aux_metric_totals(val_aux_metric_totals, aux_specs, val_count)
             score = -val_loss
             metrics.update(
                 {
                     "val_loss": val_loss,
+                    "val_action_loss": val_action_loss,
+                    "val_aux_loss": val_aux_loss,
                     "val_accuracy": val_acc,
                     "best_val_loss": -max(best_score, score),
                 }
             )
+            metrics.update({f"val_{key}": value for key, value in val_aux_head_metrics.items()})
+            _print_aux_head_train_val_metrics(f"[bc aux epoch={epoch}]", train_aux_head_metrics, val_aux_head_metrics, aux_specs)
 
         previous_best = best_score
         best_score = max(best_score, score)
@@ -687,6 +1012,8 @@ def train_bc(
             model_config=model_config,
             vocab=vocab,
             recurrent=recurrent,
+            aux_specs=aux_specs,
+            aux_preset=aux_preset,
         )
         if use_holdout_eval:
             env_summary = " ".join(
@@ -694,7 +1021,7 @@ def train_bc(
                 for env_name in resolved_eval_env_names
             )
             print(
-                f"[bc] epoch={epoch} train_loss={train_loss:.4f} train_acc={train_acc:.2%} "
+                f"[bc] epoch={epoch} train_loss={train_loss:.4f} train_aux={train_aux_loss:.4f} train_acc={train_acc:.2%} "
                 f"train_sr={train_success_rate:.2%} val_sr={val_success_rate:.2%}"
             )
             if env_summary:
@@ -714,7 +1041,8 @@ def train_bc(
                     print(f"[bc sampling counts] {count_summary}")
         else:
             print(
-                f"[bc] epoch={epoch} train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
+                f"[bc] epoch={epoch} train_loss={train_loss:.4f} train_aux={train_aux_loss:.4f} "
+                f"val_loss={val_loss:.4f} val_aux={val_aux_loss:.4f} "
                 f"train_acc={train_acc:.2%} val_acc={val_acc:.2%}"
             )
         if best_score > previous_best:
@@ -724,6 +1052,8 @@ def train_bc(
                 model_config=model_config,
                 vocab=vocab,
                 recurrent=recurrent,
+                aux_specs=aux_specs,
+                aux_preset=aux_preset,
             )
             if use_holdout_eval:
                 print(f"[milestone] new best BC holdout val success rate: {best_score:.2%}")

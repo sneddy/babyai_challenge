@@ -10,6 +10,8 @@ import gymnasium as gym
 from minigrid.utils.baby_ai_bot import BabyAIBot
 import numpy as np
 
+from ..auxiliary.labels import build_aux_targets
+from ..auxiliary.specs import get_aux_specs
 from ..common.constants import DEMO_SEED_BASE
 from ..config.loader import get_config
 from ..envs.catalog import ALL_LEADERBOARD_ENVS, LEADERBOARD_TIERS
@@ -82,13 +84,17 @@ def generate_demos(
     vocab: MissionVocabulary,
     seed: int = 0,
     time_limit_sec: float = 5.0,
+    aux_preset: str | None = None,
 ) -> None:
     ensure_babyai_envs_registered()
+    aux_specs = get_aux_specs(aux_preset)
     images = []
     mission_tokens = []
     mission_masks = []
     actions = []
     dones = []
+    aux_targets_by_name = {spec.name: [] for spec in aux_specs}
+    aux_masks_by_name = {spec.name: [] for spec in aux_specs}
 
     with suppress_noisy_env_output():
         env = gym.make(env_name)
@@ -109,12 +115,16 @@ def generate_demos(
             episode_mission_masks = []
             episode_actions = []
             episode_dones = []
+            episode_aux_targets = {spec.name: [] for spec in aux_specs}
+            episode_aux_masks = {spec.name: [] for spec in aux_specs}
             episode_success = False
 
             try:
                 with _time_limit(time_limit_sec):
                     while not done:
                         processed = preprocess_observation(obs, vocab)
+                        if aux_specs:
+                            aux_targets, aux_masks = build_aux_targets(env.unwrapped, aux_specs)
                         action = bot.replan()
                         next_obs, reward, terminated, truncated, _ = env.step(action)
                         done = terminated or truncated
@@ -123,6 +133,10 @@ def generate_demos(
                         episode_mission_masks.append(processed["mission_mask"])
                         episode_actions.append(action)
                         episode_dones.append(int(done))
+                        if aux_specs:
+                            for spec in aux_specs:
+                                episode_aux_targets[spec.name].append(aux_targets[spec.name])
+                                episode_aux_masks[spec.name].append(aux_masks[spec.name])
 
                         obs = next_obs
                         if done:
@@ -140,6 +154,10 @@ def generate_demos(
             mission_masks.extend(episode_mission_masks)
             actions.extend(episode_actions)
             dones.extend(episode_dones)
+            if aux_specs:
+                for spec in aux_specs:
+                    aux_targets_by_name[spec.name].extend(episode_aux_targets[spec.name])
+                    aux_masks_by_name[spec.name].extend(episode_aux_masks[spec.name])
             successful_episodes += 1
             progress.n = successful_episodes
             progress.set_postfix(fails=failed_episodes, attempts=attempt_index)
@@ -154,6 +172,14 @@ def generate_demos(
         mission_mask=np.asarray(mission_masks, dtype=np.int64),
         action=np.asarray(actions, dtype=np.int64),
         done=np.asarray(dones, dtype=np.int64),
+        aux_targets={
+            name: np.asarray(values, dtype=np.int64)
+            for name, values in aux_targets_by_name.items()
+        },
+        aux_masks={
+            name: np.asarray(values, dtype=np.int64)
+            for name, values in aux_masks_by_name.items()
+        },
     )
     save_demo_file(output_path, batch)
 
@@ -169,6 +195,7 @@ def generate_demo_suite(
     vocab_path: str | None,
     config_name: str,
     time_limit_sec: float,
+    aux_preset: str | None,
 ) -> None:
     if bool(env) == bool(envs):
         raise RuntimeError("Use exactly one of --env or --envs.")
@@ -196,6 +223,7 @@ def generate_demo_suite(
             vocab=vocab,
             seed=seed,
             time_limit_sec=time_limit_sec,
+            aux_preset=aux_preset,
         )
         return
 
@@ -214,5 +242,6 @@ def generate_demo_suite(
             vocab=vocab,
             seed=seed + env_index * 100_000,
             time_limit_sec=time_limit_sec,
+            aux_preset=aux_preset,
         )
         print(output_path)

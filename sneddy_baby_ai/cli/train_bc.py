@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 
+from ..auxiliary.specs import list_aux_presets
 from ..config.loader import list_config_presets, list_model_presets
 from ..training.bc.service import parse_eval_envs, train_bc
 
@@ -25,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override adaptive demo sampling floor when holdout env evaluation is enabled.",
     )
     parser.add_argument("--recurrent", action="store_true", help="Train recurrent BC instead of feedforward BC.")
+    parser.add_argument("--aux-preset", choices=list_aux_presets(), help="Optional auxiliary supervision preset.")
     return parser
 
 
@@ -41,6 +43,7 @@ def main() -> None:
         eval_env_names=parse_eval_envs(args.eval_envs),
         min_sampling_proba=args.min_sampling_proba,
         recurrent=args.recurrent,
+        aux_preset=args.aux_preset,
     )
 
 

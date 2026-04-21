@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 
+from ..auxiliary.specs import list_aux_presets
 from ..config.loader import list_config_presets
 from ..data.generation import generate_demo_suite
 
@@ -20,6 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vocab-path", help="Optional mission vocabulary path.")
     parser.add_argument("--config", default="default", choices=list_config_presets())
     parser.add_argument("--time-limit-sec", type=float, default=5.0)
+    parser.add_argument("--aux-preset", choices=list_aux_presets(), help="Optional auxiliary supervision preset.")
     return parser
 
 
@@ -35,6 +37,7 @@ def main() -> None:
         vocab_path=args.vocab_path,
         config_name=args.config,
         time_limit_sec=args.time_limit_sec,
+        aux_preset=args.aux_preset,
     )
 
 
