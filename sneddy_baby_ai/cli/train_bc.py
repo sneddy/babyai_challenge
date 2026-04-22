@@ -19,12 +19,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--warm-start", help="Optional PPO .zip or exported .pt checkpoint.")
     parser.add_argument("--eval-envs", help="Comma-separated env names for holdout evaluation.")
-    parser.add_argument(
-        "--min-sampling-proba",
-        type=float,
-        default=None,
-        help="Override adaptive demo sampling floor when holdout env evaluation is enabled.",
-    )
     parser.add_argument("--recurrent", action="store_true", help="Train recurrent BC instead of feedforward BC.")
     parser.add_argument("--aux-preset", choices=list_aux_presets(), help="Optional auxiliary supervision preset.")
     return parser
@@ -41,7 +35,6 @@ def main() -> None:
         seed=args.seed,
         warm_start_path=args.warm_start,
         eval_env_names=parse_eval_envs(args.eval_envs),
-        min_sampling_proba=args.min_sampling_proba,
         recurrent=args.recurrent,
         aux_preset=args.aux_preset,
     )

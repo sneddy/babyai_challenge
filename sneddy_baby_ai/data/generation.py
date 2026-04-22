@@ -186,22 +186,14 @@ def generate_demos(
 
 def generate_demo_suite(
     *,
-    env: str | None,
-    envs: str | None,
-    output: str | None,
+    envs: str,
     output_dir: str | None,
     episodes: int,
     seed: int,
-    vocab_path: str | None,
-    config_name: str,
-    time_limit_sec: float,
     aux_preset: str | None,
 ) -> None:
-    if bool(env) == bool(envs):
-        raise RuntimeError("Use exactly one of --env or --envs.")
-
-    config = get_config(config_name)
-    resolved_vocab_path = vocab_path or config["artifacts"]["vocab_path"]
+    config = get_config()
+    resolved_vocab_path = config["artifacts"]["vocab_path"]
     tokenization = TokenizationConfig(**config["tokenizer"])
     if Path(resolved_vocab_path).exists():
         vocab = MissionVocabulary.load(resolved_vocab_path)
@@ -212,20 +204,6 @@ def generate_demo_suite(
             seed=seed,
             tokenization=tokenization,
         )
-
-    if env is not None:
-        if output is None:
-            raise RuntimeError("--output is required when using --env.")
-        generate_demos(
-            env,
-            output,
-            episodes,
-            vocab=vocab,
-            seed=seed,
-            time_limit_sec=time_limit_sec,
-            aux_preset=aux_preset,
-        )
-        return
 
     env_names = _parse_envs(envs)
     if not env_names:
@@ -241,7 +219,7 @@ def generate_demo_suite(
             episodes,
             vocab=vocab,
             seed=seed + env_index * 100_000,
-            time_limit_sec=time_limit_sec,
+            time_limit_sec=5.0,
             aux_preset=aux_preset,
         )
         print(output_path)

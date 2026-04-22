@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 
 from ..config.loader import list_config_presets, list_model_presets
-from ..envs.curriculum import CURRICULUM_STAGES
 from ..training.rl.service import run_train_rl
 
 
@@ -13,7 +12,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train a BabyAI PPO policy.")
     parser.add_argument("--env", help="Single env name, e.g. BabyAI-GoToObj-v0.")
     parser.add_argument("--envs", help="Comma-separated envs or aliases: easy, moderate, hard, all.")
-    parser.add_argument("--stage", choices=[stage.name for stage in CURRICULUM_STAGES])
     parser.add_argument("--all-envs", action="store_true")
     parser.add_argument("--easy", action="store_true")
     parser.add_argument("--moderate", action="store_true")
@@ -33,6 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override adaptive demo sampling floor during BC warm-start generation.",
     )
+    parser.add_argument("--recurrent", action="store_true", help="Train recurrent PPO instead of feedforward PPO.")
     parser.add_argument("--rebuild-vocab", action="store_true")
     return parser
 
@@ -42,7 +41,6 @@ def main() -> None:
     run_train_rl(
         env=args.env,
         envs=args.envs,
-        stage=args.stage,
         all_envs=args.all_envs,
         easy=args.easy,
         moderate=args.moderate,
@@ -57,6 +55,7 @@ def main() -> None:
         bc_checkpoint_path=args.bc_checkpoint,
         bc_demo_paths=args.bc_demos,
         bc_min_sampling_proba=args.bc_min_sampling_proba,
+        recurrent=args.recurrent,
         rebuild_vocab=args.rebuild_vocab,
     )
 

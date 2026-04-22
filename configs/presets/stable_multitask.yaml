@@ -10,8 +10,6 @@
     "ent_coef": 0.01
   },
   "curriculum": {
-    "sampling_uniform_alpha": 0.2,
-    "current_stage_fraction": 0.7,
-    "replay_fraction": 0.3
+    "sampling_uniform_alpha": 0.2
   }
 }

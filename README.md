@@ -8,7 +8,6 @@ Compared with [baseline/README.md](/Users/sneddy/research/baby_ai/babyai-ml8103-
 - baseline uses a simple CNN over the symbolic grid; this pipeline uses **symbol embeddings + GRU mission encoder + FiLM residual blocks**
 - baseline is effectively **single-task**; this pipeline supports **one shared multi-task policy**
 - multitask sampling is **adaptive**: harder envs get sampled more often based on per-env validation success
-- baseline has no real curriculum/replay path; this pipeline supports **stage training with replay-weighted sampling**
 - baseline does not include BC warm-start in the RL path; this pipeline supports **`--bc-checkpoint` and `--bc-demos`**
 - baseline is a plain PPO starter; this pipeline supports **feedforward PPO with BC warm-start and adaptive multitask sampling**
 - baseline does not select checkpoints by cross-env validation; this pipeline keeps **`latest` and `best` by validation success rate**

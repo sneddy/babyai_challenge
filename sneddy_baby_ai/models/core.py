@@ -349,6 +349,82 @@ class BabyAIRecurrentPolicy(nn.Module):
         self.aux_heads.load_state_dict(aux_state, strict=False)
 
 
+class BabyAIRecurrentActorCritic(nn.Module):
+    """Recurrent actor-critic with the same parameter layout as export checkpoints."""
+
+    recurrent = True
+
+    def __init__(
+        self,
+        vocab_size: int,
+        config: ModelConfig,
+        pad_id: int = 0,
+    ) -> None:
+        super().__init__()
+        self.config = config
+        self.encoder = BabyAIEncoder(vocab_size=vocab_size, config=config, pad_id=pad_id)
+        self.core = nn.LSTMCell(config.features_dim, config.recurrent_hidden_dim)
+        self.actor = nn.Linear(config.recurrent_hidden_dim, config.action_dim)
+        self.critic = nn.Linear(config.recurrent_hidden_dim, 1)
+
+    @property
+    def memory_size(self) -> int:
+        return 2 * int(self.config.recurrent_hidden_dim)
+
+    def initial_state(self, batch_size: int, device: torch.device | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        device = device or torch.device("cpu")
+        hidden = torch.zeros(batch_size, self.config.recurrent_hidden_dim, device=device)
+        cell = torch.zeros(batch_size, self.config.recurrent_hidden_dim, device=device)
+        return hidden, cell
+
+    def _split_memory(self, memory: torch.Tensor | None, device: torch.device, batch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+        if memory is None:
+            return self.initial_state(batch_size=batch_size, device=device)
+        hidden_dim = self.config.recurrent_hidden_dim
+        return memory[:, :hidden_dim], memory[:, hidden_dim:]
+
+    @staticmethod
+    def _merge_memory(state: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+        return torch.cat(state, dim=1)
+
+    def forward_step(
+        self,
+        obs: dict[str, torch.Tensor],
+        state: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.distributions.Categorical, torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        features = self.encoder(obs)
+        if state is None:
+            state = self.initial_state(features.shape[0], features.device)
+        hidden, cell = self.core(features, state)
+        logits = self.actor(hidden)
+        value = self.critic(hidden).squeeze(-1)
+        return torch.distributions.Categorical(logits=logits), value, (hidden, cell)
+
+    def forward(self, obs: dict[str, torch.Tensor], memory: torch.Tensor | None) -> dict[str, torch.Tensor | torch.distributions.Categorical]:
+        state = self._split_memory(memory, device=obs["image"].device, batch_size=obs["image"].shape[0])
+        dist, value, next_state = self.forward_step(obs, state=state)
+        return {
+            "dist": dist,
+            "value": value,
+            "memory": self._merge_memory(next_state),
+            "extra_predictions": {},
+        }
+
+    @torch.no_grad()
+    def act(
+        self,
+        obs: dict[str, torch.Tensor],
+        state: tuple[torch.Tensor, torch.Tensor] | None = None,
+        deterministic: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        dist, value, next_state = self.forward_step(obs, state=state)
+        action = dist.probs.argmax(dim=-1) if deterministic else dist.sample()
+        return action, value, next_state
+
+    def export_state_dict(self) -> dict[str, torch.Tensor]:
+        return dict(self.state_dict())
+
+
 def tensorize_observation(obs: dict[str, Any], device: torch.device | str | None = None) -> dict[str, torch.Tensor]:
     out = {}
     for key, value in obs.items():

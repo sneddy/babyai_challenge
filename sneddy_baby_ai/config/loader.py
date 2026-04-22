@@ -74,8 +74,3 @@ def get_config(config_name: str = "default", model_preset: str | None = None) ->
 
 def load_env_catalog() -> dict:
     return _load_json_yaml(CONFIG_ROOT / "envs" / "tiers.yaml")
-
-
-def load_curriculum_stage_payloads() -> list[dict]:
-    payload = _load_json_yaml(CONFIG_ROOT / "envs" / "curriculum.yaml")
-    return list(payload["stages"])

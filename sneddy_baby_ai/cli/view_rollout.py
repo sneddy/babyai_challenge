@@ -1,4 +1,4 @@
-"""CLI for visualizing policy and expert BabyAI rollouts."""
+"""CLI for rendering BabyAI policy-vs-expert comparisons."""
 
 from __future__ import annotations
 
@@ -7,21 +7,15 @@ from pathlib import Path
 
 from tqdm.auto import tqdm
 
-from ..analysis.rollout import (
-    ExportedCheckpointAgent,
-    ExpertBotAgent,
-    compare_policy_vs_expert,
-    rollout_agent,
-    save_media,
-)
+from ..analysis.rollout import compare_policy_vs_expert
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Render or save BabyAI rollouts for a checkpoint and the expert bot.")
+    parser = argparse.ArgumentParser(description="Render or save BabyAI policy-vs-expert comparisons.")
     parser.add_argument("--env", required=True, help="Env name, e.g. BabyAI-PutNextLocal-v0.")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--checkpoint", help="Exported .pt checkpoint for policy mode or compare mode.")
-    parser.add_argument("--mode", choices=["policy", "expert", "compare"], default="compare")
+    parser.add_argument("--checkpoint", required=True, help="Exported .pt checkpoint for the policy side of the comparison.")
+    parser.add_argument("--mode", choices=["compare"], default="compare")
     parser.add_argument(
         "--output-dir",
         default="sneddy_baby_ai/artifacts/rollouts",
@@ -42,8 +36,6 @@ def _env_stem(env_name: str) -> str:
 def main() -> None:
     args = build_parser().parse_args()
 
-    if args.mode in {"policy", "compare"} and not args.checkpoint:
-        raise RuntimeError("--checkpoint is required for policy and compare modes.")
     if args.count <= 0:
         raise RuntimeError("--count must be positive.")
 
@@ -55,59 +47,20 @@ def main() -> None:
     for offset in tqdm(range(args.count), desc=f"rollouts {env_stem}", unit="rollout"):
         seed = args.seed + offset
         output_path = output_dir / f"{env_stem}_{args.mode}_seed{seed}.{args.format}"
-
-        if args.mode == "compare":
-            policy_episode, expert_episode, gif_path = compare_policy_vs_expert(
-                env_name=args.env,
-                seed=seed,
-                checkpoint_path=args.checkpoint,
-                output_path=str(output_path),
-                max_steps=args.max_steps,
-                device=args.device,
-                duration_ms=args.duration_ms,
-                output_format=args.format,
-            )
-            print(
-                f"{gif_path} | "
-                f"policy status={policy_episode.status} success={policy_episode.success} reward={policy_episode.reward:.3f} steps={policy_episode.steps} | "
-                f"expert status={expert_episode.status} success={expert_episode.success} reward={expert_episode.reward:.3f} steps={expert_episode.steps}"
-            )
-            saved_paths.append(gif_path)
-            continue
-
-        if args.mode == "policy":
-            episode = rollout_agent(
-                env_name=args.env,
-                seed=seed,
-                agent=ExportedCheckpointAgent(args.checkpoint, device=args.device),
-                label="policy",
-                max_steps=args.max_steps,
-            )
-        else:
-            from ..analysis.rollout import _make_env
-
-            env = _make_env(args.env)
-            try:
-                episode = rollout_agent(
-                    env_name=args.env,
-                    seed=seed,
-                    agent=ExpertBotAgent(env),
-                    label="expert",
-                    max_steps=args.max_steps,
-                    env=env,
-                )
-            finally:
-                env.close()
-
-        gif_path = save_media(
-            episode.frames,
-            str(output_path),
+        policy_episode, expert_episode, gif_path = compare_policy_vs_expert(
+            env_name=args.env,
+            seed=seed,
+            checkpoint_path=args.checkpoint,
+            output_path=str(output_path),
+            max_steps=args.max_steps,
+            device=args.device,
             duration_ms=args.duration_ms,
             output_format=args.format,
         )
         print(
-            f"{gif_path} | status={episode.status} success={episode.success} reward={episode.reward:.3f} "
-            f"steps={episode.steps} | mission={episode.mission}"
+            f"{gif_path} | "
+            f"policy status={policy_episode.status} success={policy_episode.success} reward={policy_episode.reward:.3f} steps={policy_episode.steps} | "
+            f"expert status={expert_episode.status} success={expert_episode.success} reward={expert_episode.reward:.3f} steps={expert_episode.steps}"
         )
         saved_paths.append(gif_path)
 

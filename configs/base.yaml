@@ -10,6 +10,7 @@
     "end_learning_rate": null,
     "learning_rate_period": null,
     "n_steps": 128,
+    "recurrence": 16,
     "batch_size": 256,
     "n_epochs": 4,
     "gamma": 0.99,
@@ -33,10 +34,6 @@
     "sampling_episode_budget_per_task": null
   },
   "curriculum": {
-    "promote_success_rate": 0.95,
-    "promote_consecutive_evals": 3,
-    "current_stage_fraction": 0.8,
-    "replay_fraction": 0.2,
     "sampling_uniform_alpha": 0.2
   },
   "training": {
