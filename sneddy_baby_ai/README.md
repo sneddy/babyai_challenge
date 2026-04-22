@@ -1,168 +1,371 @@
-# sneddy_baby_ai
+# sneddy_baby_ai Runbook
 
-## Difference vs baseline
+This README is intentionally operational. It documents:
 
-Compared with [baseline/README.md](/Users/sneddy/research/baby_ai/babyai-ml8103-leaderboard-2026/baseline/README.md), this pipeline changes the main weak points of the starter:
+- which CLI entrypoints exist
+- which config files matter
+- how to launch the main training workflows
+- where checkpoints, demos, and submissions are written
 
-- baseline ignores mission text; this pipeline uses **mission language explicitly**
-- baseline uses a simple CNN over the symbolic grid; this pipeline uses **symbol embeddings + GRU mission encoder + FiLM residual blocks**
-- baseline is effectively **single-task**; this pipeline supports **one shared multi-task policy**
-- multitask sampling is **adaptive**: harder envs get sampled more often based on per-env validation success
-- baseline does not include BC warm-start in the RL path; this pipeline supports **`--bc-checkpoint` and `--bc-demos`**
-- baseline is a plain PPO starter; this pipeline supports **feedforward PPO with BC warm-start and adaptive multitask sampling**
-- baseline does not select checkpoints by cross-env validation; this pipeline keeps **`latest` and `best` by validation success rate**
+## Main Entrypoints
 
-Short version:
+The package exposes four CLIs that cover the normal workflow:
 
-- baseline = simple PPO starter
-- `sneddy_baby_ai` = language-grounded symbolic BabyAI policy with multitask, BC warm-start, and export-safe submission packaging
+| Task | Command |
+| --- | --- |
+| generate demonstrations | `python3 -m sneddy_baby_ai.cli.generate_demos` |
+| train PPO / RL | `python3 -m sneddy_baby_ai.cli.train_rl` |
+| train behavior cloning | `python3 -m sneddy_baby_ai.cli.train_bc` |
+| export leaderboard submission | `python3 -m sneddy_baby_ai.cli.export_submission` |
 
-## Difference vs BabyAI 1.1
+For the exact experiment launchers used in this repository, see:
 
-This codebase is BabyAI-1.1-inspired, not a direct port.
+- `scripts/generate_easy.sh`
+- `scripts/generate_moderate.sh`
+- `scripts/generate_hard.sh`
+- `scripts/feedforward/*.sh`
+- `scripts/recurrent/*.sh`
 
-What is similar:
+## Important Config Files
 
-- symbolic bag-of-words tile embeddings
-- GRU mission encoding
-- FiLM conditioning
-- residual visual blocks
+### Shared config
 
-What is different:
+| File | Purpose |
+| --- | --- |
+| `configs/base.yaml` | global defaults for tokenizer, PPO, BC, artifact paths, and training defaults |
+| `configs/envs/tiers.yaml` | tier aliases for `easy`, `moderate`, `hard` |
 
-- built for the **leaderboard submission contract**, not the original BabyAI stack
-- uses a **global vocab across leaderboard envs**
-- supports **one shared multi-task policy**
-- uses **cross-env validation** to choose `best`
-- integrates **BC warm-start into the RL runner**
-- exports directly into `demo_submission/`
+### Training presets
 
-Short version:
+These are the presets you can pass through `--config`.
 
-- BabyAI 1.1 = architecture ideas in the original research stack
-- `sneddy_baby_ai` = BabyAI-style architecture adapted to one final leaderboard submission
+| Preset | File | Typical use |
+| --- | --- | --- |
+| `default` | `configs/presets/default.yaml` | plain default PPO / BC values |
+| `stable_multitask` | `configs/presets/stable_multitask.yaml` | main shared-policy RL training |
+| `bc_easy` | `configs/presets/bc_easy.yaml` | BC on easy-tier demos |
+| `bc_moderate` | `configs/presets/bc_moderate.yaml` | BC on easy + moderate demos |
+| `bc_hard` | `configs/presets/bc_hard.yaml` | BC on all tiers |
+| `bc_warmstart_push` | `configs/presets/bc_warmstart_push.yaml` | feedforward RL fine-tuning after BC |
+| `bc_warmstart_push_recurrent` | `configs/presets/bc_warmstart_push_recurrent.yaml` | recurrent RL fine-tuning after BC |
 
-## Run
+### Model presets
 
-Useful config presets:
+These are the presets you can pass through `--model-preset`.
 
-- `bootstrap`: from-scratch multitask bootstrap
-- `stable_multitask`: main long-run shared-policy preset
-- `hard_focus`: stronger pressure on still-unsolved tasks
-- `conservative_finetune`: gentle continuation of a good checkpoint
-- `bc_recovery`: BC-heavy recovery preset for stuck manipulation tasks
-- `debug`: short smoke test
+| Preset | File | Typical use |
+| --- | --- | --- |
+| `base` | `configs/models/base.yaml` | generic default model |
+| `minimalistic` | `configs/models/minimalistic.yaml` | small grounded RL baseline |
+| `advance` | `configs/models/advance.yaml` | main feedforward BC model |
+| `advance_large` | `configs/models/advance_large.yaml` | larger recurrent probe |
+| `advance_largest` | `configs/models/advance_largest.yaml` | main recurrent + auxiliary model |
+
+### Auxiliary supervision
+
+| File | Purpose |
+| --- | --- |
+| `sneddy_baby_ai/auxiliary/specs.py` | defines auxiliary head presets |
+
+Current auxiliary preset:
+
+- `aux_v1`
+
+## Environment Selection
+
+All CLIs that accept env groups support tier aliases from `configs/envs/tiers.yaml`.
 
 Examples:
 
+- `--env BabyAI-GoToObj-v0`
+- `--envs BabyAI-GoToObj-v0,BabyAI-GoToLocal-v0`
+- `--envs easy`
+- `--envs easy,moderate`
+- `--all-envs`
+- `--easy`
+- `--moderate`
+- `--hard`
+
+## Common Workflows
+
+### 1. Generate demonstrations
+
+Generate easy-tier demos:
+
 ```bash
-python3 -m sneddy_baby_ai.cli.train_rl --env BabyAI-GoToObj-v0 --config bootstrap --seed 42 --timesteps 500000
-python3 -m sneddy_baby_ai.cli.train_rl --all-envs --run-name leaderboard_multitask --config stable_multitask --seed 42 --timesteps 1500000
+python3 -m sneddy_baby_ai.cli.generate_demos \
+  --envs easy \
+  --episodes 5000 \
+  --output-dir sneddy_baby_ai/artifacts/demos/easy \
+  --aux-preset aux_v1
 ```
 
-Single env:
+Generate moderate-tier demos:
+
+```bash
+python3 -m sneddy_baby_ai.cli.generate_demos \
+  --envs moderate \
+  --episodes 5000 \
+  --output-dir sneddy_baby_ai/artifacts/demos/moderate \
+  --aux-preset aux_v1
+```
+
+Generate hard-tier demos:
+
+```bash
+python3 -m sneddy_baby_ai.cli.generate_demos \
+  --envs hard \
+  --episodes 1000 \
+  --output-dir sneddy_baby_ai/artifacts/demos/hard \
+  --aux-preset aux_v1
+```
+
+Notes:
+
+- `--aux-preset aux_v1` is recommended if you will later train recurrent BC with auxiliary heads.
+- Use the `scripts/generate_*.sh` wrappers if you want the repository defaults directly.
+
+### 2. Train RL / PPO
+
+Single environment:
 
 ```bash
 python3 -m sneddy_baby_ai.cli.train_rl \
   --env BabyAI-GoToObj-v0 \
+  --run-name gotoobj_rl \
   --config default \
+  --model-preset base \
   --seed 42 \
   --timesteps 1000000
 ```
 
-Multi-task:
+Multitask RL over tiers:
 
 ```bash
 python3 -m sneddy_baby_ai.cli.train_rl \
-  --envs BabyAI-GoToObj-v0,BabyAI-GoToLocal-v0,BabyAI-GoToRedBallGrey-v0 \
-  --run-name easy_nav_multitask \
-  --config default \
+  --envs easy,moderate \
+  --run-name rl_easy_moderate \
+  --config stable_multitask \
+  --model-preset minimalistic \
   --seed 42 \
-  --timesteps 1000000
+  --timesteps 1500000
 ```
 
-Tier aliases also work:
+Important flags:
+
+- `--run-name`: controls checkpoint/export naming
+- `--config`: training preset from `configs/presets/`
+- `--model-preset`: architecture preset from `configs/models/`
+- `--warm-start`: initialize PPO from an older `.zip` or exported `.pt`
+- `--bc-checkpoint`: initialize PPO from a BC checkpoint
+- `--bc-demos`: run BC first from demos, then warm-start PPO from it
+- `--recurrent`: train recurrent PPO instead of feedforward PPO
+- `--resume`: continue an existing PPO run from an SB3 `.zip`
+
+### 3. Train feedforward BC
+
+Easy-tier BC:
 
 ```bash
-python3 -m sneddy_baby_ai.cli.train_rl --envs easy,moderate --run-name easy_moderate --config stable_multitask --seed 42 --timesteps 1000000
-python3 -m sneddy_baby_ai.cli.train_rl --easy --run-name full_easy --config stable_multitask --seed 42 --timesteps 1000000
-```
-
-All leaderboard envs:
-
-```bash
-python3 -m sneddy_baby_ai.cli.train_rl \
-  --all-envs \
-  --run-name leaderboard_multitask \
-  --config default \
+python3 -m sneddy_baby_ai.cli.train_bc \
+  --demos \
+    sneddy_baby_ai/artifacts/demos/easy/gotoobj.npz \
+    sneddy_baby_ai/artifacts/demos/easy/gotolocal.npz \
+    sneddy_baby_ai/artifacts/demos/easy/gotoredballgrey.npz \
+    sneddy_baby_ai/artifacts/demos/easy/pickuploc.npz \
+    sneddy_baby_ai/artifacts/demos/easy/putnextlocal.npz \
+  --checkpoint sneddy_baby_ai/artifacts/exports/advance_bc_easy.pt \
+  --vocab sneddy_baby_ai/artifacts/global_vocab.json \
+  --config bc_easy \
+  --model-preset advance \
   --seed 42 \
-  --timesteps 1000000
+  --eval-envs BabyAI-GoToObj-v0,BabyAI-GoToLocal-v0,BabyAI-GoToRedBallGrey-v0,BabyAI-PickupLoc-v0,BabyAI-PutNextLocal-v0
 ```
 
-BC warm-start from demos:
+Easy + moderate BC:
+
+```bash
+python3 -m sneddy_baby_ai.cli.train_bc \
+  --demos \
+    sneddy_baby_ai/artifacts/demos/easy/gotoobj.npz \
+    sneddy_baby_ai/artifacts/demos/easy/gotolocal.npz \
+    sneddy_baby_ai/artifacts/demos/easy/gotoredballgrey.npz \
+    sneddy_baby_ai/artifacts/demos/easy/pickuploc.npz \
+    sneddy_baby_ai/artifacts/demos/easy/putnextlocal.npz \
+    sneddy_baby_ai/artifacts/demos/moderate/gotoredball.npz \
+    sneddy_baby_ai/artifacts/demos/moderate/gotoobjmaze.npz \
+    sneddy_baby_ai/artifacts/demos/moderate/goto.npz \
+    sneddy_baby_ai/artifacts/demos/moderate/pickup.npz \
+    sneddy_baby_ai/artifacts/demos/moderate/open.npz \
+  --checkpoint sneddy_baby_ai/artifacts/exports/advance_bc_easy_moderate.pt \
+  --vocab sneddy_baby_ai/artifacts/global_vocab.json \
+  --config bc_moderate \
+  --model-preset advance \
+  --seed 42 \
+  --eval-envs BabyAI-GoToObj-v0,BabyAI-GoToLocal-v0,BabyAI-GoToRedBallGrey-v0,BabyAI-PickupLoc-v0,BabyAI-PutNextLocal-v0,BabyAI-GoToRedBall-v0,BabyAI-GoToObjMaze-v0,BabyAI-GoTo-v0,BabyAI-Pickup-v0,BabyAI-Open-v0
+```
+
+Important BC flags:
+
+- `--checkpoint`: output `.pt` path
+- `--vocab`: mission vocabulary JSON, usually `sneddy_baby_ai/artifacts/global_vocab.json`
+- `--warm-start`: initialize BC model from an older `.zip` or exported `.pt`
+- `--eval-envs`: strongly recommended for holdout evaluation and `best` checkpoint selection
+
+Behavior notes:
+
+- if `--eval-envs` is given and you pass multiple demo files, BC uses holdout environment evaluation
+- with multiple tasks, adaptive BC resampling is driven by per-env `val_success_rate`
+- if `--eval-envs` is omitted, BC falls back to a `90/10` demo split
+
+### 4. Train recurrent BC with auxiliary heads
+
+Main recurrent + auxiliary pattern:
+
+```bash
+python3 -m sneddy_baby_ai.cli.train_bc \
+  --demos \
+    sneddy_baby_ai/artifacts/demos/easy/gotoobj.npz \
+    sneddy_baby_ai/artifacts/demos/easy/gotolocal.npz \
+    sneddy_baby_ai/artifacts/demos/easy/gotoredballgrey.npz \
+    sneddy_baby_ai/artifacts/demos/easy/pickuploc.npz \
+    sneddy_baby_ai/artifacts/demos/easy/putnextlocal.npz \
+  --checkpoint sneddy_baby_ai/artifacts/exports/advance_bc_easy_recurrent_aux.pt \
+  --vocab sneddy_baby_ai/artifacts/global_vocab.json \
+  --config bc_easy \
+  --model-preset advance_largest \
+  --seed 42 \
+  --recurrent \
+  --aux-preset aux_v1 \
+  --eval-envs BabyAI-GoToObj-v0,BabyAI-GoToLocal-v0,BabyAI-GoToRedBallGrey-v0,BabyAI-PickupLoc-v0,BabyAI-PutNextLocal-v0
+```
+
+Use this pattern when you want:
+
+- recurrent BC instead of feedforward BC
+- auxiliary state heads from `aux_v1`
+- the larger recurrent architecture
+
+### 5. Fine-tune RL from BC
+
+Feedforward RL after BC:
 
 ```bash
 python3 -m sneddy_baby_ai.cli.train_rl \
-  --env BabyAI-GoToObj-v0 \
-  --config default \
+  --envs easy,moderate \
+  --run-name rl_from_bc \
+  --config bc_warmstart_push \
+  --model-preset advance \
   --seed 42 \
   --timesteps 1000000 \
-  --bc-demos sneddy_baby_ai/artifacts/demos/gotoobj_demos.npz
+  --warm-start sneddy_baby_ai/artifacts/exports/advance_bc_all_tiers_v1_best.pt
 ```
 
-Artifacts:
-
-- feedforward latest: `sneddy_baby_ai/artifacts/checkpoints/<RUN>_latest.zip`
-- latest export: `sneddy_baby_ai/artifacts/exports/<RUN>_policy.pt`
-- best export: `sneddy_baby_ai/artifacts/exports/<RUN>_best.pt`
-
-## Continue
-
-Resume the same run:
+Recurrent RL after recurrent BC:
 
 ```bash
 python3 -m sneddy_baby_ai.cli.train_rl \
-  --all-envs \
-  --run-name leaderboard_multitask \
-  --config default \
+  --envs easy,moderate \
+  --run-name rl_from_recurrent_bc \
+  --config bc_warmstart_push_recurrent \
+  --model-preset advance_largest \
   --seed 42 \
   --timesteps 1000000 \
-  --resume sneddy_baby_ai/artifacts/checkpoints/leaderboard_multitask_latest.zip
+  --recurrent \
+  --warm-start sneddy_baby_ai/artifacts/exports/advance_bc_easy_moderate_recurrent_aux_v1_best.pt
 ```
 
-Warm-start a new run from an old checkpoint:
+### 6. Resume and warm-start
+
+Resume an RL run from an SB3 checkpoint:
+
+```bash
+python3 -m sneddy_baby_ai.cli.train_rl \
+  --envs easy,moderate \
+  --run-name rl_easy_moderate \
+  --config stable_multitask \
+  --seed 42 \
+  --resume sneddy_baby_ai/artifacts/checkpoints/rl_easy_moderate_latest.zip
+```
+
+Warm-start a new RL run from an older PPO or exported policy:
 
 ```bash
 python3 -m sneddy_baby_ai.cli.train_rl \
   --env BabyAI-GoToLocal-v0 \
+  --run-name gotolocal_warm \
   --config default \
   --seed 42 \
-  --timesteps 1000000 \
-  --warm-start sneddy_baby_ai/artifacts/checkpoints/GoToObj_latest.zip
+  --warm-start sneddy_baby_ai/artifacts/exports/goto_easy_minimalistic_best.pt
 ```
 
-`Ctrl+C` keeps resumable artifacts and the latest exported policy.
+Warm-start BC from an older checkpoint:
 
-## Validate
+```bash
+python3 -m sneddy_baby_ai.cli.train_bc \
+  --demos sneddy_baby_ai/artifacts/demos/easy/putnextlocal.npz \
+  --checkpoint sneddy_baby_ai/artifacts/exports/putnextlocal_recurrent_bc.pt \
+  --vocab sneddy_baby_ai/artifacts/global_vocab.json \
+  --config bc_easy \
+  --model-preset advance_large \
+  --seed 42 \
+  --recurrent \
+  --aux-preset aux_v1 \
+  --warm-start sneddy_baby_ai/artifacts/exports/advance_bc_easy_recurrent_aux_v1_best.pt \
+  --eval-envs BabyAI-PutNextLocal-v0
+```
 
-Export:
+## Export and Evaluation
+
+Export a trained policy into a leaderboard submission zip:
 
 ```bash
 python3 -m sneddy_baby_ai.cli.export_submission \
-  --checkpoint sneddy_baby_ai/artifacts/exports/advance_bc_easy_moderate_recurrent_aux_v1_best.pt \
-  --zip-output submissions/largest_aux_rec.zip
+  --checkpoint sneddy_baby_ai/artifacts/exports/advance_bc_all_recurrent_aux_v1_best.pt \
+  --zip-output submissions/advance_bc_all_recurrent_aux_v1_best.zip
 ```
 
-Validate ZIP:
+Validate the zip:
 
 ```bash
-python3 babyai-ml8103-leaderboard-2026/evaluation/validate_submission.py demo_submission.zip
+python3 babyai-ml8103-leaderboard-2026/evaluation/validate_submission.py \
+  submissions/advance_bc_all_recurrent_aux_v1_best.zip
 ```
 
-Official local evaluation:
+Run official local evaluation:
 
 ```bash
 python3 babyai-ml8103-leaderboard-2026/evaluation/evaluate_submission.py \
-  --submission demo_submission.zip \
+  --submission submissions/advance_bc_all_recurrent_aux_v1_best.zip \
   --seed-dir babyai-ml8103-leaderboard-2026/eval_seeds
 ```
+
+## Artifacts
+
+Default artifact roots are defined in `configs/base.yaml`.
+
+Main outputs:
+
+| Path | Contents |
+| --- | --- |
+| `sneddy_baby_ai/artifacts/demos/` | generated expert demos |
+| `sneddy_baby_ai/artifacts/checkpoints/` | resumable RL `.zip` checkpoints |
+| `sneddy_baby_ai/artifacts/exports/` | exported `.pt` policies and `*_best.pt` checkpoints |
+| `sneddy_baby_ai/artifacts/logs/` | JSONL training metrics |
+| `submissions/` | zipped submission packages |
+
+Typical naming:
+
+- RL latest checkpoint: `sneddy_baby_ai/artifacts/checkpoints/<RUN>_latest.zip`
+- RL exported policy: `sneddy_baby_ai/artifacts/exports/<RUN>_policy.pt`
+- BC latest checkpoint: path passed to `--checkpoint`
+- best BC / best RL export: usually `*_best.pt`
+
+## Fastest Path
+
+If you just want the shortest route from data to leaderboard zip:
+
+1. generate demos with `scripts/generate_easy.sh`, `scripts/generate_moderate.sh`, `scripts/generate_hard.sh`
+2. train BC or recurrent BC using the matching scripts under `scripts/feedforward/` or `scripts/recurrent/`
+3. export the best `.pt` checkpoint with `python3 -m sneddy_baby_ai.cli.export_submission`
+4. validate and evaluate the resulting zip with the official scripts under `babyai-ml8103-leaderboard-2026/evaluation/`
