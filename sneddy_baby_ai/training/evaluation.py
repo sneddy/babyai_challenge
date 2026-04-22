@@ -192,7 +192,7 @@ def format_sampling_summary(sampling_weights: dict[str, float] | None) -> str:
     if not sampling_weights:
         return ""
     return " ".join(
-        f"{env_name.replace('BabyAI-', '').replace('-v0', '')}={weight:.2f}"
+        f"{env_name.replace('BabyAI-', '').replace('-v0', '')}={weight:.3f}"
         for env_name, weight in sampling_weights.items()
     )
 

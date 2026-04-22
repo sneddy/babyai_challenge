@@ -254,7 +254,10 @@ def _build_learning_rate_schedule(config: dict) -> float | Callable[[float], flo
 
     def learning_rate_fn(progress_remaining: float) -> float:
         elapsed_timesteps = (1.0 - float(progress_remaining)) * total_timesteps
-        cosine_progress = min(max(elapsed_timesteps / period_timesteps, 0.0), 1.0)
+        if learning_rate_period is None:
+            cosine_progress = min(max(elapsed_timesteps / period_timesteps, 0.0), 1.0)
+        else:
+            cosine_progress = (elapsed_timesteps % period_timesteps) / period_timesteps
         cosine_value = 0.5 * (1.0 + math.cos(math.pi * cosine_progress))
         return end_lr + (start_lr - end_lr) * cosine_value
 

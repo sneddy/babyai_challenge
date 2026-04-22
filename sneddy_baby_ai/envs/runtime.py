@@ -6,6 +6,28 @@ import contextlib
 import io
 import warnings
 
+
+def suppress_babyai_sampling_rejection_logs() -> None:
+    """Hide noisy BabyAI mission-generation rejection prints."""
+
+    try:
+        from minigrid.envs.babyai.core import roomgrid_level
+    except Exception:
+        return
+
+    original_print = getattr(roomgrid_level, "print", print)
+    if getattr(roomgrid_level, "_sneddy_sampling_log_patch_installed", False):
+        return
+
+    def filtered_print(*args, **kwargs):
+        text = " ".join(str(arg) for arg in args)
+        if text.startswith("Sampling rejected:") or text.startswith("Timeout during mission generation:"):
+            return
+        return original_print(*args, **kwargs)
+
+    roomgrid_level.print = filtered_print
+    roomgrid_level._sneddy_sampling_log_patch_installed = True
+
 def suppress_known_runtime_warnings() -> None:
     """Hide noisy third-party warnings that are not actionable here."""
 
@@ -26,6 +48,8 @@ def suppress_known_runtime_warnings() -> None:
 suppress_known_runtime_warnings()
 
 import minigrid
+
+suppress_babyai_sampling_rejection_logs()
 
 
 @contextlib.contextmanager

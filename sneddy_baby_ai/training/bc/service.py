@@ -1033,7 +1033,7 @@ def train_bc(
                 print(env_summary)
             if adaptive_demo_sampling:
                 ratio_summary = " ".join(
-                    f"{env_name.replace('BabyAI-', '').replace('-v0', '')}={getattr(train_loader, 'sampling_ratios', {}).get(env_name, 0.0):.2f}"
+                    f"{env_name.replace('BabyAI-', '').replace('-v0', '')}={getattr(train_loader, 'sampling_ratios', {}).get(env_name, 0.0):.3f}"
                     for env_name in demo_batches_by_env
                 )
                 count_summary = " ".join(

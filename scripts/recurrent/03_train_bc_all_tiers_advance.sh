@@ -23,5 +23,7 @@ python3 -m sneddy_baby_ai.cli.train_bc \
   --config bc_hard \
   --model-preset advance_largest \
   --seed 42 \
+  --recurrent \
+  --aux-preset aux_v1 \
   --eval-envs BabyAI-GoToObj-v0,BabyAI-GoToLocal-v0,BabyAI-GoToRedBallGrey-v0,BabyAI-PickupLoc-v0,BabyAI-PutNextLocal-v0,BabyAI-GoToRedBall-v0,BabyAI-GoToObjMaze-v0,BabyAI-GoTo-v0,BabyAI-Pickup-v0,BabyAI-Open-v0,BabyAI-Unlock-v0,BabyAI-UnblockPickup-v0,BabyAI-PutNextS7N4-v0,BabyAI-Synth-v0,BabyAI-SynthLoc-v0 \
-  --warm-start sneddy_baby_ai/artifacts/exports/advance_bc_easy_moderate_recurrent_aux_v1.pt
+  --warm-start sneddy_baby_ai/artifacts/exports/advance_bc_easy_moderate_recurrent_aux_v1_best.pt
