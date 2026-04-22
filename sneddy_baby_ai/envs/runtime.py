@@ -6,17 +6,6 @@ import contextlib
 import io
 import warnings
 
-import minigrid
-
-
-@contextlib.contextmanager
-def suppress_noisy_env_output():
-    """Suppress noisy BabyAI/minigrid generation prints during env creation/reset."""
-
-    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        yield
-
-
 def suppress_known_runtime_warnings() -> None:
     """Hide noisy third-party warnings that are not actionable here."""
 
@@ -34,6 +23,19 @@ def suppress_known_runtime_warnings() -> None:
     )
 
 
+suppress_known_runtime_warnings()
+
+import minigrid
+
+
+@contextlib.contextmanager
+def suppress_noisy_env_output():
+    """Suppress noisy BabyAI/minigrid generation prints during env creation/reset."""
+
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        yield
+
+
 def ensure_babyai_envs_registered() -> None:
     """Import minigrid so BabyAI gym ids are registered.
 
@@ -41,6 +43,5 @@ def ensure_babyai_envs_registered() -> None:
     `gym.make("BabyAI-...")`.
     """
 
-    suppress_known_runtime_warnings()
     with suppress_noisy_env_output():
         _ = minigrid

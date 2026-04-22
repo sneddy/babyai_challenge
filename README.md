@@ -150,7 +150,8 @@ Export:
 
 ```bash
 python3 -m sneddy_baby_ai.cli.export_submission \
-  --checkpoint sneddy_baby_ai/artifacts/exports/leaderboard_multitask_best.pt
+  --checkpoint sneddy_baby_ai/artifacts/exports/advance_bc_easy_moderate_recurrent_aux_v1_best.pt \
+  --zip-output submissions/largest_aux_rec.zip
 ```
 
 Validate ZIP:

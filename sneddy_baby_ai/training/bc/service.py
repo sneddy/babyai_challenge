@@ -619,6 +619,7 @@ def _evaluate_bc_policy(
     env_names: list[str],
     seed: int,
     n_eval_episodes: int,
+    max_steps: int,
     log_prefix: str | None = None,
 ):
     def _print_env_metric(env_name: str, metrics: dict[str, float], env_index: int, total_envs: int) -> None:
@@ -644,6 +645,7 @@ def _evaluate_bc_policy(
         vocab=vocab,
         seed=seed,
         n_eval_episodes=n_eval_episodes,
+        max_steps=max_steps,
         on_env_complete=_print_env_metric,
     )
 
@@ -777,6 +779,7 @@ def train_bc(
         )
     if use_holdout_eval:
         print(f"[bc] holdout eval envs: {', '.join(resolved_eval_env_names)}")
+        print(f"[bc] eval_max_steps={int(config['training'].get('eval_max_steps', 1000))}")
         if adaptive_demo_sampling:
             print(f"[bc] adaptive demo sampling envs: {', '.join(demo_batches_by_env)}")
     else:
@@ -791,6 +794,7 @@ def train_bc(
             env_names=resolved_eval_env_names,
             seed=seed,
             n_eval_episodes=config["training"]["n_eval_episodes"],
+            max_steps=int(config["training"].get("eval_max_steps", 1000)),
             log_prefix="[bc warm-start eval env]",
         )
         print(
@@ -929,6 +933,7 @@ def train_bc(
                 env_names=resolved_eval_env_names,
                 seed=seed,
                 n_eval_episodes=config["training"]["n_eval_episodes"],
+                max_steps=int(config["training"].get("eval_max_steps", 1000)),
                 log_prefix=f"[bc eval env epoch={epoch}]",
             )
             score = float(val_success_rate)

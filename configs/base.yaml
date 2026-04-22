@@ -46,7 +46,8 @@
     "total_timesteps": 1000000,
     "save_freq": 50000,
     "eval_freq": 10000,
-    "n_eval_episodes": 10
+    "n_eval_episodes": 10,
+    "eval_max_steps": 1000
   },
   "artifacts": {
     "root": "./sneddy_baby_ai/artifacts",

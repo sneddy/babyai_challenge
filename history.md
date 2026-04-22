@@ -431,18 +431,13 @@ Observed pattern:
 
 ### 7.3 Expanded auxiliary head set
 
-Because the first head set still seemed too focused on local geometry and late placement, the auxiliary set was expanded to cover earlier pickup and phase-tracking signals.
-
-Additional heads added later:
+Because the first head set still seemed too focused on local geometry and late placement, the auxiliary set was expanded:
 - `valid_pickup_action`
 - `fixed_target_visible`
-- `need_pickup_phase`
-- `need_drop_phase`
 
 Reason for the expansion:
 - explicitly supervise whether the policy is in the pickup phase or drop phase,
 - distinguish visibility of the fixed target from the generic instruction-object visibility signal,
-- add a direct pickup-side analogue of `valid_drop_position`.
 
 Practical outcome:
 - this gave better instrumentation and made it easier to see that the policy often recognized local pickup/drop conditions,
@@ -456,7 +451,7 @@ Practical outcome:
 Since the recurrent `advance` model plus auxiliary heads still did not make `PutNextLocal` converge reliably, model capacity was increased further for isolated `PutNextLocal` runs.
 
 Larger recurrent preset introduced:
-- `advance_large`
+- `advance_largest`
 
 Compared with `advance`, this increased:
 - image embedding width,
@@ -469,12 +464,12 @@ Model config:
 ```json
 {
   "action_dim": 7,
-  "image_embedding_dim": 192,
-  "mission_embedding_dim": 96,
-  "mission_hidden_dim": 192,
+  "image_embedding_dim": 256,
+  "mission_embedding_dim": 128,
+  "mission_hidden_dim": 256,
   "attention": true,
-  "features_dim": 448,
-  "recurrent_hidden_dim": 448,
+  "features_dim": 512,
+  "recurrent_hidden_dim": 512,
   "tile_vocab_sizes": {
     "object": 16,
     "color": 16,
